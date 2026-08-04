@@ -1339,14 +1339,13 @@ enum ReportGenerator {
             for day in orderedDays {
                 guard let sessions = workoutsByDay[day] else { continue }
                 let daySets = sessions.flatMap { $0.sets.sorted { $0.loggedOrder < $1.loggedOrder } }
-                // Keep the exact sequence in which exercises were logged. Only
-                // adjacent sets of the same exercise become one table row.
+                // One row per exercise, ordered by the first set logged for it.
+                // This keeps a complete exercise together even if the user
+                // alternated between exercises while recording the workout.
                 var exerciseRows: [(muscleGroup: String, exercise: String, sets: [LiftSet])] = []
                 for set in daySets {
-                    if let lastIndex = exerciseRows.indices.last,
-                       exerciseRows[lastIndex].muscleGroup == set.muscleGroup,
-                       exerciseRows[lastIndex].exercise == set.exercise {
-                        exerciseRows[lastIndex].sets.append(set)
+                    if let existingIndex = exerciseRows.firstIndex(where: { $0.muscleGroup == set.muscleGroup && $0.exercise == set.exercise }) {
+                        exerciseRows[existingIndex].sets.append(set)
                     } else {
                         exerciseRows.append((set.muscleGroup, set.exercise, [set]))
                     }
@@ -1359,12 +1358,16 @@ enum ReportGenerator {
                 let rows = exerciseRows.map { row -> [String] in
                     let uniqueWeights = Array(Set(row.sets.map(\.weightKg)))
                     let weight = uniqueWeights.count == 1 ? "\(uniqueWeights[0].formatted()) kg" : "Mixed"
-                    let individualSets = uniqueWeights.count == 1
-                        ? row.sets.map { String($0.reps) }.joined(separator: " · ")
-                        : row.sets.map { "\($0.weightKg.formatted()) kg × \($0.reps)" }.joined(separator: " · ")
-                    return [row.muscleGroup, row.exercise, weight, individualSets]
+                    var setColumns = Array(repeating: "", count: 4)
+                    for (index, set) in row.sets.prefix(4).enumerated() {
+                        setColumns[index] = uniqueWeights.count == 1 ? String(set.reps) : "\(set.weightKg.formatted()) × \(set.reps)"
+                    }
+                    if row.sets.count > 4 {
+                        setColumns[3] += " +\(row.sets.count - 4)"
+                    }
+                    return [row.muscleGroup, row.exercise, weight] + setColumns
                 }
-                table(headers: ["MUSCLE GROUP", "EXERCISE", "WEIGHT", "INDIVIDUAL SETS"], rows: rows, widths: [105, 155, 80, 200], pageTitle: "JourneyFit strength logs", y: &y)
+                table(headers: ["MUSCLE GROUP", "EXERCISE", "WEIGHT", "SET 1", "SET 2", "SET 3", "SET 4"], rows: rows, widths: [80, 130, 70, 65, 65, 65, 65], pageTitle: "JourneyFit strength logs", y: &y)
                 for note in notes {
                     if y + 20 > pageBottom { y = startPage("JourneyFit strength logs"); section("Logged sessions", &y) }
                     draw("Note: \(note)", in: CGRect(x: margin, y: y + 3, width: width, height: 19), font: .italicSystemFont(ofSize: 10), color: mutedInk)
