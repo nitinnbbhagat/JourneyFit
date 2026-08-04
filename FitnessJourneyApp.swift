@@ -684,6 +684,19 @@ struct WorkoutLogView: View {
                                                 VStack(alignment: .trailing, spacing: 2) { Text("\(group.setIDs.count) sets · \(totalReps(for: group)) reps").font(.caption.weight(.bold)).foregroundStyle(JourneyFitTheme.accent); Image(systemName: expandedExerciseIDs.contains(group.id) ? "chevron.up" : "chevron.down").font(.caption.weight(.bold)).foregroundStyle(JourneyFitTheme.muted) }
                                             }
                                         }.buttonStyle(.plain)
+                                        if isEditingSavedSession {
+                                            HStack(spacing: 12) {
+                                                Spacer()
+                                                Button { moveExercise(group.id, earlier: true) } label: { Label("Move earlier", systemImage: "arrow.up") }
+                                                    .buttonStyle(.bordered)
+                                                    .disabled(exerciseGroups.first?.id == group.id)
+                                                Button { moveExercise(group.id, earlier: false) } label: { Label("Move later", systemImage: "arrow.down") }
+                                                    .buttonStyle(.bordered)
+                                                    .disabled(exerciseGroups.last?.id == group.id)
+                                            }
+                                            .font(.caption.weight(.semibold))
+                                            .tint(JourneyFitTheme.accent)
+                                        }
                                         if expandedExerciseIDs.contains(group.id) {
                                             ForEach(Array(group.setIDs.enumerated()), id: \.element) { displayIndex, setID in
                                                 if let set = workout.sets.first(where: { $0.id == setID }) {
@@ -810,6 +823,24 @@ struct WorkoutLogView: View {
     private func toggleExercise(_ id: String) {
         if expandedExerciseIDs.contains(id) { expandedExerciseIDs.remove(id) }
         else { expandedExerciseIDs.insert(id) }
+    }
+
+    private func moveExercise(_ groupID: String, earlier: Bool) {
+        var groups = exerciseGroups
+        guard let currentIndex = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        let destinationIndex = earlier ? currentIndex - 1 : currentIndex + 1
+        guard groups.indices.contains(destinationIndex) else { return }
+        groups.swapAt(currentIndex, destinationIndex)
+
+        var order = 0
+        for group in groups {
+            for setID in group.setIDs {
+                guard let set = workout.sets.first(where: { $0.id == setID }) else { continue }
+                set.loggedOrder = order
+                order += 1
+            }
+        }
+        try? context.save()
     }
 
     private func closeSavedSession() {
@@ -1358,7 +1389,7 @@ enum ReportGenerator {
                 let rows = exerciseRows.map { row -> [String] in
                     let uniqueWeights = Array(Set(row.sets.map(\.weightKg)))
                     let weight = uniqueWeights.count == 1 ? "\(uniqueWeights[0].formatted()) kg" : "Mixed"
-                    var setColumns = Array(repeating: "", count: 4)
+                    var setColumns = Array(repeating: "-", count: 4)
                     for (index, set) in row.sets.prefix(4).enumerated() {
                         setColumns[index] = uniqueWeights.count == 1 ? String(set.reps) : "\(set.weightKg.formatted()) × \(set.reps)"
                     }
