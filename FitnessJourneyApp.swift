@@ -116,6 +116,20 @@ enum ExerciseCatalog {
     }
 }
 
+struct WorkoutTemplate: Identifiable {
+    let name: String
+    let subtitle: String
+    let exercises: [(muscleGroup: String, exercise: String)]
+    var id: String { name }
+
+    static let betaTemplates: [WorkoutTemplate] = [
+        WorkoutTemplate(name: "Push", subtitle: "Chest, shoulders and triceps", exercises: [("Chest", "Chest Press"), ("Shoulders", "Shoulder Press"), ("Triceps", "Pulley Tricep Pushdown")]),
+        WorkoutTemplate(name: "Pull", subtitle: "Back and biceps", exercises: [("Back", "Bent Over Barbell Row"), ("Back", "RDL"), ("Biceps", "Wide-Grip Barbell Curl")]),
+        WorkoutTemplate(name: "Upper", subtitle: "Balanced upper body", exercises: [("Chest", "Dumbbell Incline Press"), ("Back", "Lateral Pull Down"), ("Shoulders", "Side Lateral Raise"), ("Biceps", "Close-Grip Barbell Curl")]),
+        WorkoutTemplate(name: "Lower", subtitle: "Legs and calves", exercises: [("Legs", "Leg Press"), ("Legs", "Leg Curl"), ("Legs", "Calf Raises")])
+    ]
+}
+
 // MARK: - HealthKit
 
 @MainActor
@@ -225,17 +239,32 @@ struct RootView: View {
     }
 }
 
+private enum AppTab: Hashable {
+    case today, log, progress, history, profile
+}
+
 struct AppTabView: View {
     @StateObject private var health = HealthKitManager()
+    @State private var selectedTab: AppTab = .today
+    @State private var requestedWorkoutID: UUID?
+
     var body: some View {
-        TabView {
-            DashboardView().tabItem { Label("Today", systemImage: "chart.xyaxis.line") }
-            WorkoutLogView().tabItem { Label("Log", systemImage: "plus.circle.fill") }
-            ReportsView().tabItem { Label("Reports", systemImage: "doc.text.image") }
-            SettingsView().tabItem { Label("Profile", systemImage: "person.crop.circle") }
+        TabView(selection: $selectedTab) {
+            DashboardView(startWorkout: { selectedTab = .log })
+                .tabItem { Label("Today", systemImage: "house.fill") }.tag(AppTab.today)
+            WorkoutLogView(requestedWorkoutID: $requestedWorkoutID)
+                .tabItem { Label("Log", systemImage: "plus.circle.fill") }.tag(AppTab.log)
+            ProgressView()
+                .tabItem { Label("Progress", systemImage: "chart.line.uptrend.xyaxis") }.tag(AppTab.progress)
+            ReportsView(openWorkout: { workoutID in
+                requestedWorkoutID = workoutID
+                selectedTab = .log
+            })
+                .tabItem { Label("History", systemImage: "calendar") }.tag(AppTab.history)
+            SettingsView().tabItem { Label("Profile", systemImage: "person.crop.circle") }.tag(AppTab.profile)
         }
         .environmentObject(health)
-        .tint(.accentColor)
+        .tint(JourneyFitTheme.accent)
     }
 }
 
@@ -278,6 +307,7 @@ struct DashboardView: View {
     @State private var displayedWorkoutCount = 0
     @State private var isCustomPeriod = false
     @State private var showingPeriodPicker = false
+    let startWorkout: () -> Void
 
     private var selectedInterval: DateInterval {
         DateInterval(start: Calendar.current.startOfDay(for: startDate), end: Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: endDate))!)
@@ -296,7 +326,7 @@ struct DashboardView: View {
                         HStack(spacing: 12) {
                             Image(uiImage: UIImage(named: "JourneyFitLogo") ?? UIImage())
                                 .resizable().scaledToFit().frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            VStack(alignment: .leading, spacing: 2) { Text("JourneyFit").font(.title2.weight(.bold)); Text("Progress").font(.subheadline).foregroundStyle(.secondary) }
+                            VStack(alignment: .leading, spacing: 2) { Text("JourneyFit").font(.title2.weight(.bold)); Text("Today").font(.subheadline).foregroundStyle(.secondary) }
                             Spacer()
                         }
                         HStack {
@@ -314,7 +344,21 @@ struct DashboardView: View {
                         } else {
                             Button { Task { await health.requestAuthorization() } } label: { Label("Connect Apple Health", systemImage: "heart.fill").frame(maxWidth: .infinity).padding(.vertical, 10) }.buttonStyle(.borderedProminent).tint(.pink)
                         }
-                        LiftingProgressDashboard(workouts: strengthWorkouts)
+                        JourneyFitCard {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Label("TRAINING", systemImage: "figure.strengthtraining.traditional").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
+                                Text(strengthWorkouts.isEmpty ? "Ready for your first workout?" : "Ready to train?").font(.title3.weight(.bold))
+                                Text(strengthWorkouts.isEmpty ? "Log each set as you go and JourneyFit will build your progress history." : "Start a fresh session or continue logging today’s workout.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                                Button(action: startWorkout) { Label(strengthWorkouts.isEmpty ? "Start workout" : "Open workout log", systemImage: "plus.circle.fill").frame(maxWidth: .infinity).padding(.vertical, 5) }
+                                    .buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
+                            }
+                        }
+                        if let insight = trainingInsight {
+                            JourneyFitCard {
+                                Label(insight, systemImage: "chart.line.uptrend.xyaxis")
+                                    .font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.ink)
+                            }
+                        }
                     }
                     .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 28)
                 }
@@ -351,10 +395,25 @@ struct DashboardView: View {
             displayedWorkoutCount = summary.workoutCount
         }
     }
+
+    private var trainingInsight: String? {
+        let ordered = strengthWorkouts.sorted { $0.loggedAt > $1.loggedAt }
+        guard let latest = ordered.first else { return nil }
+        let exercises = Set(latest.sets.map(\.exercise))
+        guard let exercise = exercises.sorted().first,
+              let previous = ordered.dropFirst().first(where: { $0.sets.contains(where: { $0.exercise == exercise }) }) else {
+            return "Your latest session is ready to review in Progress."
+        }
+        let currentReps = latest.sets.filter { $0.exercise == exercise }.reduce(0) { $0 + $1.reps }
+        let previousReps = previous.sets.filter { $0.exercise == exercise }.reduce(0) { $0 + $1.reps }
+        let delta = currentReps - previousReps
+        return delta == 0 ? "\(exercise): matched your previous session." : "\(exercise): \(delta > 0 ? "+" : "")\(delta) reps vs your previous session."
+    }
 }
 
 struct LiftingProgressDashboard: View {
     let workouts: [StrengthWorkout]
+    var sessionLimit: Int? = 3
     @State private var selectedMuscleGroup: String?
     @State private var selectedExercise: String?
     @State private var metric: ProgressMetric = .totalReps
@@ -391,7 +450,10 @@ struct LiftingProgressDashboard: View {
             }
     }
 
-    private var displayedPoints: [ProgressPoint] { Array(points.suffix(3)) }
+    private var displayedPoints: [ProgressPoint] {
+        guard let sessionLimit else { return points }
+        return Array(points.suffix(sessionLimit))
+    }
 
     private func valueText(for point: ProgressPoint) -> String {
         metric == .weight ? "\(point.weight.formatted()) kg" : "\(point.totalReps) reps"
@@ -399,7 +461,7 @@ struct LiftingProgressDashboard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("ALL-TIME LIFTING PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
+            Text(sessionLimit == nil ? "LIFTING PROGRESS" : "RECENT LIFTING PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
             HStack(spacing: 10) {
                 Picker("Muscle group", selection: $selectedMuscleGroup) {
                     Text("Choose group").tag(Optional<String>.none)
@@ -424,7 +486,7 @@ struct LiftingProgressDashboard: View {
                 JourneyFitCard {
                     VStack(alignment: .leading, spacing: 14) {
                         Picker("Metric", selection: $metric) { ForEach(ProgressMetric.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-                        Text("Latest \(displayedPoints.count) logged session\(displayedPoints.count == 1 ? "" : "s")").font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
+                        Text(sessionLimit == nil ? "\(displayedPoints.count) logged session\(displayedPoints.count == 1 ? "" : "s") in this period" : "Latest \(displayedPoints.count) logged session\(displayedPoints.count == 1 ? "" : "s")").font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
                         Chart(displayedPoints) { point in
                             LineMark(x: .value("Session", point.date), y: .value(metric.chartTitle, metric == .weight ? point.weight : Double(point.totalReps)))
                                 .foregroundStyle(JourneyFitTheme.accent).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
@@ -440,6 +502,60 @@ struct LiftingProgressDashboard: View {
                     }
                 }
             }
+        }
+    }
+}
+
+private enum ProgressRange: String, CaseIterable, Identifiable {
+    case fourWeeks = "4W"
+    case twelveWeeks = "12W"
+    case allTime = "All"
+    var id: String { rawValue }
+    var dayCount: Int? {
+        switch self {
+        case .fourWeeks: return 28
+        case .twelveWeeks: return 84
+        case .allTime: return nil
+        }
+    }
+}
+
+struct ProgressView: View {
+    @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
+    @State private var range: ProgressRange = .twelveWeeks
+
+    private var rangeWorkouts: [StrengthWorkout] {
+        guard let days = range.dayCount,
+              let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) else { return workouts }
+        return workouts.filter { $0.startedAt >= cutoff }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                JourneyFitTheme.background.ignoresSafeArea()
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("PROGRESS").font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(JourneyFitTheme.accent)
+                        Text("See the work\nadd up.").font(.system(size: 30, weight: .bold, design: .rounded)).foregroundStyle(JourneyFitTheme.ink)
+                        Picker("Progress range", selection: $range) {
+                            ForEach(ProgressRange.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        JourneyFitCard {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(range == .allTime ? "All recorded sessions" : "Last \(range.dayCount ?? 0) days")
+                                    .font(.headline)
+                                Text("Choose an exercise to compare reps and working weight over time.")
+                                    .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                            }
+                        }
+                        LiftingProgressDashboard(workouts: rangeWorkouts, sessionLimit: nil)
+                    }
+                    .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 28)
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 }
@@ -609,6 +725,7 @@ struct DoubleProgressionCard: View {
 
 struct WorkoutLogView: View {
     @Environment(\.modelContext) private var context
+    @Binding var requestedWorkoutID: UUID?
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var savedWorkouts: [StrengthWorkout]
     @State private var workout = StrengthWorkout()
     @State private var editor: SetEditor?
@@ -619,6 +736,7 @@ struct WorkoutLogView: View {
     @State private var historyCalendarDate = Calendar.current.startOfDay(for: .now)
     @State private var isEditingSavedSession = false
     @State private var expandedExerciseIDs = Set<String>()
+    @State private var showingTemplates = false
 
     private var exerciseGroups: [DraftExerciseGroup] {
         var orderedKeys: [String] = []
@@ -666,6 +784,15 @@ struct WorkoutLogView: View {
                                 .font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.accent).padding(16)
                                 .background(JourneyFitTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
+                        if !isEditingSavedSession {
+                            HStack(spacing: 10) {
+                                Button { showingTemplates = true } label: { Label("Use template", systemImage: "square.grid.2x2.fill").frame(maxWidth: .infinity) }
+                                    .buttonStyle(.bordered).tint(JourneyFitTheme.accent)
+                                Button { loadLastWorkout() } label: { Label("Repeat last", systemImage: "arrow.clockwise").frame(maxWidth: .infinity) }
+                                    .buttonStyle(.bordered).tint(JourneyFitTheme.accent).disabled(savedWorkouts.isEmpty)
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
                         HStack { Text("Exercises").font(.title3.weight(.bold)).foregroundStyle(JourneyFitTheme.ink); Spacer(); Text("\(exerciseGroups.count)").font(.subheadline.weight(.bold)).foregroundStyle(JourneyFitTheme.accent).padding(.horizontal, 10).padding(.vertical, 5).background(JourneyFitTheme.accent.opacity(0.12), in: Capsule()) }
                         if workout.sets.isEmpty {
                             JourneyFitCard {
@@ -677,6 +804,7 @@ struct WorkoutLogView: View {
                                 }
                             }
                         } else {
+                            RestTimerCard()
                             ForEach(exerciseGroups) { group in
                                 JourneyFitCard {
                                     VStack(alignment: .leading, spacing: 10) {
@@ -780,6 +908,13 @@ struct WorkoutLogView: View {
                 }.presentationDetents([.large])
             }
             .sheet(isPresented: $showingDatePicker) { WorkoutDatePicker(selectedDate: $selectedDate).presentationDetents([.large]) }
+            .sheet(isPresented: $showingTemplates) {
+                TemplatePicker { template in
+                    apply(template: template)
+                    showingTemplates = false
+                }
+                .presentationDetents([.medium, .large])
+            }
             .sheet(isPresented: $showingAllSessions) {
                 NavigationStack {
                     VStack(spacing: 20) {
@@ -808,6 +943,8 @@ struct WorkoutLogView: View {
                 .environment(\.calendar, WeekCalendar.mondayFirst)
             }
             .alert("Workout saved", isPresented: $savedMessage) { Button("Done", role: .cancel) {} }
+            .onAppear { openRequestedWorkoutIfNeeded() }
+            .onChange(of: requestedWorkoutID) { _, _ in openRequestedWorkoutIfNeeded() }
         }
     }
 
@@ -852,6 +989,38 @@ struct WorkoutLogView: View {
         selectedDate = Calendar.current.startOfDay(for: .now)
         isEditingSavedSession = false
         expandedExerciseIDs.removeAll()
+    }
+
+    private func openRequestedWorkoutIfNeeded() {
+        guard let requestedWorkoutID,
+              let saved = savedWorkouts.first(where: { $0.id == requestedWorkoutID }) else { return }
+        workout = saved
+        selectedDate = Calendar.current.startOfDay(for: saved.startedAt)
+        isEditingSavedSession = true
+        expandedExerciseIDs.removeAll()
+        self.requestedWorkoutID = nil
+    }
+
+    private func apply(template: WorkoutTemplate) {
+        workout = StrengthWorkout()
+        selectedDate = Calendar.current.startOfDay(for: .now)
+        isEditingSavedSession = false
+        for item in template.exercises {
+            let previous = recentSets.first { $0.muscleGroup == item.muscleGroup && $0.exercise == item.exercise }
+            let set = LiftSet(loggedOrder: workout.sets.count, exercise: item.exercise, muscleGroup: item.muscleGroup, weightKg: previous?.weightKg ?? 20, reps: previous?.reps ?? 8)
+            workout.sets.append(set)
+        }
+        expandedExerciseIDs = Set(exerciseGroups.map(\.id))
+    }
+
+    private func loadLastWorkout() {
+        guard let last = savedWorkouts.sorted(by: { $0.loggedAt > $1.loggedAt }).first else { return }
+        workout = StrengthWorkout()
+        selectedDate = Calendar.current.startOfDay(for: .now)
+        for set in last.sets.sorted(by: { $0.loggedOrder < $1.loggedOrder }) {
+            workout.sets.append(LiftSet(loggedOrder: workout.sets.count, exercise: set.exercise, muscleGroup: set.muscleGroup, weightKg: set.weightKg, reps: set.reps))
+        }
+        expandedExerciseIDs = Set(exerciseGroups.map(\.id))
     }
 
     private func savedSessionCard(_ day: SavedWorkoutDay) -> some View {
@@ -926,6 +1095,68 @@ struct SavedWorkoutDay: Identifiable {
     var setCount: Int { sets.count }
     var totalReps: Int { sets.reduce(0) { $0 + $1.reps } }
     var exerciseCount: Int { Set(sets.map(\.exercise)).count }
+}
+
+struct TemplatePicker: View {
+    @Environment(\.dismiss) private var dismiss
+    let choose: (WorkoutTemplate) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List(WorkoutTemplate.betaTemplates) { template in
+                Button {
+                    choose(template)
+                    dismiss()
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(template.name).font(.headline)
+                        Text(template.subtitle).font(.subheadline).foregroundStyle(.secondary)
+                        Text(template.exercises.map(\.exercise).joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+            }
+            .navigationTitle("Workout template")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+    }
+}
+
+struct RestTimerCard: View {
+    @State private var endDate: Date?
+
+    private var remaining: Int {
+        guard let endDate else { return 0 }
+        return max(0, Int(endDate.timeIntervalSinceNow.rounded(.up)))
+    }
+
+    var body: some View {
+        JourneyFitCard {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                HStack(spacing: 12) {
+                    Image(systemName: remaining > 0 ? "timer" : "timer.circle").foregroundStyle(JourneyFitTheme.accent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(remaining > 0 ? "Rest: \(remaining / 60):\(String(format: "%02d", remaining % 60))" : "Rest timer")
+                            .font(.headline)
+                        Text(remaining > 0 ? "Take the time you need." : "Start a quick recovery timer between sets.")
+                            .font(.caption).foregroundStyle(JourneyFitTheme.muted)
+                    }
+                    Spacer()
+                    if remaining > 0 {
+                        Button("Stop") { endDate = nil }.buttonStyle(.bordered)
+                    } else {
+                        Menu("Start") {
+                            Button("60 seconds") { endDate = .now.addingTimeInterval(60) }
+                            Button("90 seconds") { endDate = .now.addingTimeInterval(90) }
+                            Button("2 minutes") { endDate = .now.addingTimeInterval(120) }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct AddSetView: View {
@@ -1067,6 +1298,7 @@ struct ReportDatePicker: View {
 
 struct ReportsView: View {
     @Environment(\.modelContext) private var context
+    let openWorkout: (UUID) -> Void
     @Query(sort: \InBodyReport.createdAt, order: .reverse) private var inBodyReports: [InBodyReport]
     @Query(sort: \GeneratedReport.createdAt, order: .reverse) private var generatedReports: [GeneratedReport]
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
@@ -1081,6 +1313,14 @@ struct ReportsView: View {
     @State private var reportToDelete: GeneratedReport?
     @State private var startDate = HealthKitManager.mondayThroughSunday().start
     @State private var endDate = HealthKitManager.mondayThroughSunday().end.addingTimeInterval(-1)
+    @State private var historyDate = Calendar.current.startOfDay(for: .now)
+
+    private var selectedHistoryWorkout: StrengthWorkout? {
+        workouts
+            .filter { Calendar.current.isDate($0.startedAt, inSameDayAs: historyDate) }
+            .sorted { $0.loggedAt < $1.loggedAt }
+            .first
+    }
 
     var body: some View {
         NavigationStack {
@@ -1088,8 +1328,31 @@ struct ReportsView: View {
                 JourneyFitTheme.background.ignoresSafeArea()
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 20) {
-                        Text("REPORTS").font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(JourneyFitTheme.accent)
-                        Text("Your story,\nready to share.").font(.system(size: 30, weight: .bold, design: .rounded)).foregroundStyle(JourneyFitTheme.ink)
+                        Text("HISTORY & REPORTS").font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(JourneyFitTheme.accent)
+                        Text("Review the work.\nShare the story.").font(.system(size: 30, weight: .bold, design: .rounded)).foregroundStyle(JourneyFitTheme.ink)
+                        JourneyFitCard {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label("WORKOUT HISTORY", systemImage: "calendar").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
+                                DatePicker("Logged workout date", selection: $historyDate, in: ...Date.now, displayedComponents: .date)
+                                    .datePickerStyle(.graphical)
+                                if let workout = selectedHistoryWorkout {
+                                    Button { openWorkout(workout.id) } label: {
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text("Open logged workout").font(.headline)
+                                                Text("\(workout.sets.count) sets · \(workout.sets.reduce(0) { $0 + $1.reps }) reps · \(Set(workout.sets.map(\.exercise)).count) exercises")
+                                                    .font(.caption).foregroundStyle(JourneyFitTheme.muted)
+                                            }
+                                            Spacer()
+                                            Image(systemName: "pencil.circle.fill").foregroundStyle(JourneyFitTheme.accent)
+                                        }
+                                    }
+                                    .buttonStyle(.bordered)
+                                } else {
+                                    Text("No JourneyFit workout logged on this date.").font(.caption).foregroundStyle(JourneyFitTheme.muted)
+                                }
+                            }
+                        }
                         JourneyFitCard {
                             VStack(alignment: .leading, spacing: 14) {
                                 Label("REPORT PERIOD", systemImage: "calendar.badge.clock").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
