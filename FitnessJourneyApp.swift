@@ -10,7 +10,7 @@ import Charts
 @main
 struct JourneyFitApp: App {
     private let container: ModelContainer = {
-        let schema = Schema([StrengthWorkout.self, LiftSet.self, InBodyReport.self, GeneratedReport.self])
+        let schema = Schema([StrengthWorkout.self, LiftSet.self, InBodyReport.self, InBodyMeasurement.self, GeneratedReport.self])
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         return try! ModelContainer(for: schema, configurations: [configuration])
     }()
@@ -84,6 +84,27 @@ final class InBodyReport {
     }
 }
 
+/// Measurements are deliberately entered by the person from their InBody result.
+/// JourneyFit preserves imported InBody images unchanged and never OCRs them.
+@Model
+final class InBodyMeasurement {
+    var id: UUID = UUID()
+    var measuredAt: Date
+    var weightKg: Double
+    var bodyFatPercent: Double
+    var visceralFatLevel: Double
+    var bmi: Double
+
+    init(id: UUID = UUID(), measuredAt: Date = .now, weightKg: Double, bodyFatPercent: Double, visceralFatLevel: Double, bmi: Double) {
+        self.id = id
+        self.measuredAt = measuredAt
+        self.weightKg = weightKg
+        self.bodyFatPercent = bodyFatPercent
+        self.visceralFatLevel = visceralFatLevel
+        self.bmi = bmi
+    }
+}
+
 @Model
 final class GeneratedReport {
     var id: UUID = UUID()
@@ -116,17 +137,24 @@ enum ExerciseCatalog {
     }
 }
 
-struct WorkoutTemplate: Identifiable {
-    let name: String
-    let subtitle: String
-    let exercises: [(muscleGroup: String, exercise: String)]
-    var id: String { name }
+struct TemplateExercise: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var muscleGroup: String
+    var exercise: String
+}
+
+struct WorkoutTemplate: Codable, Identifiable {
+    var id = UUID()
+    var name: String
+    var subtitle: String
+    var exercises: [TemplateExercise]
+    var isBuiltIn = false
 
     static let betaTemplates: [WorkoutTemplate] = [
-        WorkoutTemplate(name: "Push", subtitle: "Chest, shoulders and triceps", exercises: [("Chest", "Chest Press"), ("Shoulders", "Shoulder Press"), ("Triceps", "Pulley Tricep Pushdown")]),
-        WorkoutTemplate(name: "Pull", subtitle: "Back and biceps", exercises: [("Back", "Bent Over Barbell Row"), ("Back", "RDL"), ("Biceps", "Wide-Grip Barbell Curl")]),
-        WorkoutTemplate(name: "Upper", subtitle: "Balanced upper body", exercises: [("Chest", "Dumbbell Incline Press"), ("Back", "Lateral Pull Down"), ("Shoulders", "Side Lateral Raise"), ("Biceps", "Close-Grip Barbell Curl")]),
-        WorkoutTemplate(name: "Lower", subtitle: "Legs and calves", exercises: [("Legs", "Leg Press"), ("Legs", "Leg Curl"), ("Legs", "Calf Raises")])
+        WorkoutTemplate(name: "Push", subtitle: "Chest, shoulders and triceps", exercises: [TemplateExercise(muscleGroup: "Chest", exercise: "Chest Press"), TemplateExercise(muscleGroup: "Shoulders", exercise: "Shoulder Press"), TemplateExercise(muscleGroup: "Triceps", exercise: "Pulley Tricep Pushdown")], isBuiltIn: true),
+        WorkoutTemplate(name: "Pull", subtitle: "Back and biceps", exercises: [TemplateExercise(muscleGroup: "Back", exercise: "Bent Over Barbell Row"), TemplateExercise(muscleGroup: "Back", exercise: "RDL"), TemplateExercise(muscleGroup: "Biceps", exercise: "Wide-Grip Barbell Curl")], isBuiltIn: true),
+        WorkoutTemplate(name: "Upper", subtitle: "Balanced upper body", exercises: [TemplateExercise(muscleGroup: "Chest", exercise: "Dumbbell Incline Press"), TemplateExercise(muscleGroup: "Back", exercise: "Lateral Pull Down"), TemplateExercise(muscleGroup: "Shoulders", exercise: "Side Lateral Raise"), TemplateExercise(muscleGroup: "Biceps", exercise: "Close-Grip Barbell Curl")], isBuiltIn: true),
+        WorkoutTemplate(name: "Lower", subtitle: "Legs and calves", exercises: [TemplateExercise(muscleGroup: "Legs", exercise: "Leg Press"), TemplateExercise(muscleGroup: "Legs", exercise: "Leg Curl"), TemplateExercise(muscleGroup: "Legs", exercise: "Calf Raises")], isBuiltIn: true)
     ]
 }
 
@@ -413,7 +441,7 @@ struct DashboardView: View {
 
 struct LiftingProgressDashboard: View {
     let workouts: [StrengthWorkout]
-    var sessionLimit: Int? = 3
+    var sessionLimit: Int? = 5
     @State private var selectedMuscleGroup: String?
     @State private var selectedExercise: String?
     @State private var metric: ProgressMetric = .totalReps
@@ -522,12 +550,20 @@ private enum ProgressRange: String, CaseIterable, Identifiable {
 
 struct ProgressView: View {
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
+    @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var inBodyMeasurements: [InBodyMeasurement]
     @State private var range: ProgressRange = .twelveWeeks
+    @State private var showingInBodyEditor = false
 
     private var rangeWorkouts: [StrengthWorkout] {
         guard let days = range.dayCount,
               let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) else { return workouts }
         return workouts.filter { $0.startedAt >= cutoff }
+    }
+
+    private var rangeInBodyMeasurements: [InBodyMeasurement] {
+        guard let days = range.dayCount,
+              let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) else { return inBodyMeasurements }
+        return inBodyMeasurements.filter { $0.measuredAt >= cutoff }
     }
 
     var body: some View {
@@ -550,12 +586,153 @@ struct ProgressView: View {
                                     .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
                             }
                         }
-                        LiftingProgressDashboard(workouts: rangeWorkouts, sessionLimit: nil)
+                        LiftingProgressDashboard(workouts: rangeWorkouts, sessionLimit: 5)
+                        InBodyProgressDashboard(measurements: rangeInBodyMeasurements) {
+                            showingInBodyEditor = true
+                        }
                     }
                     .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 28)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showingInBodyEditor) { InBodyMeasurementEditor().presentationDetents([.large]) }
+        }
+    }
+}
+
+struct InBodyProgressDashboard: View {
+    enum Metric: String, CaseIterable, Identifiable {
+        case weight = "Weight"
+        case bodyFat = "Body fat %"
+        case visceralFat = "Visceral fat"
+        case bmi = "BMI"
+        var id: String { rawValue }
+        var unit: String { self == .weight ? "kg" : self == .bodyFat ? "%" : "" }
+    }
+
+    private struct Point: Identifiable {
+        let id: UUID
+        let date: Date
+        let value: Double
+    }
+
+    let measurements: [InBodyMeasurement]
+    let addMeasurement: () -> Void
+    @State private var metric: Metric = .weight
+
+    private var points: [Point] {
+        measurements.sorted { $0.measuredAt < $1.measuredAt }.map {
+            Point(id: $0.id, date: $0.measuredAt, value: value(for: $0))
+        }
+    }
+
+    private var latest: InBodyMeasurement? { measurements.max { $0.measuredAt < $1.measuredAt } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("INBODY PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
+                Spacer()
+                Button("Log result", action: addMeasurement).font(.caption.weight(.semibold))
+            }
+            JourneyFitCard {
+                if points.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("No measurements yet").font(.headline)
+                        Text("Enter the values from your InBody result to build a private trend. Imported report images remain unchanged.")
+                            .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                        Button("Log InBody result", action: addMeasurement).buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Picker("InBody metric", selection: $metric) {
+                            ForEach(Metric.allCases) { Text($0.rawValue).tag($0) }
+                        }.pickerStyle(.menu)
+                        if let latest {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Latest").font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
+                                    Text("\(value(for: latest).formatted(.number.precision(.fractionLength(0...1)))) \(metric.unit)")
+                                        .font(.title3.weight(.bold))
+                                }
+                                Spacer()
+                                Text(category(for: latest)).font(.caption.weight(.bold)).padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(categoryColor(for: latest).opacity(0.14), in: Capsule()).foregroundStyle(categoryColor(for: latest))
+                            }
+                        }
+                        Chart(points) { point in
+                            LineMark(x: .value("Date", point.date), y: .value(metric.rawValue, point.value))
+                                .foregroundStyle(JourneyFitTheme.accent).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
+                            PointMark(x: .value("Date", point.date), y: .value(metric.rawValue, point.value))
+                                .foregroundStyle(JourneyFitTheme.accent)
+                                .annotation(position: .top, overflowResolution: .init(x: .fit, y: .disabled)) {
+                                    Text("\(point.value.formatted(.number.precision(.fractionLength(0...1))))\(metric.unit)").font(.caption2.weight(.bold))
+                                }
+                        }
+                        .chartXAxis { AxisMarks(values: points.map(\.date)) { AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+                        .chartYAxis { AxisMarks(position: .leading) }
+                        .frame(height: 190)
+                        Text(categoryExplanation).font(.caption).foregroundStyle(JourneyFitTheme.muted)
+                    }
+                }
+            }
+        }
+    }
+
+    private func value(for measurement: InBodyMeasurement) -> Double {
+        switch metric { case .weight: measurement.weightKg; case .bodyFat: measurement.bodyFatPercent; case .visceralFat: measurement.visceralFatLevel; case .bmi: measurement.bmi }
+    }
+
+    private func category(for measurement: InBodyMeasurement) -> String {
+        switch metric {
+        case .bmi:
+            switch measurement.bmi { case ..<18.5: "Under"; case ..<25: "Normal"; case ..<30: "Over"; default: "High" }
+        case .visceralFat:
+            switch measurement.visceralFatLevel { case ...9: "Normal"; case ...14: "Over"; default: "High" }
+        case .weight, .bodyFat: "Recorded"
+        }
+    }
+
+    private func categoryColor(for measurement: InBodyMeasurement) -> Color {
+        category(for: measurement) == "Normal" || category(for: measurement) == "Recorded" ? JourneyFitTheme.success : .orange
+    }
+
+    private var categoryExplanation: String {
+        switch metric {
+        case .bmi: "BMI category: Under < 18.5 · Normal 18.5–24.9 · Over 25–29.9 · High ≥ 30."
+        case .visceralFat: "Visceral-fat category: Normal 1–9 · Over 10–14 · High 15+."
+        case .weight: "Weight has no universal under/normal/over category without personal targets."
+        case .bodyFat: "Body-fat ranges depend on age and sex, so the result is shown without a generic category."
+        }
+    }
+}
+
+struct InBodyMeasurementEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
+    @State private var date = Calendar.current.startOfDay(for: .now)
+    @State private var weightKg = 70.0
+    @State private var bodyFatPercent = 20.0
+    @State private var visceralFatLevel = 8.0
+    @State private var bmi = 22.0
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("FROM YOUR INBODY RESULT") {
+                    DatePicker("Measurement date", selection: $date, in: ...Date.now, displayedComponents: .date)
+                    TextField("Weight (kg)", value: $weightKg, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
+                    TextField("Body fat (%)", value: $bodyFatPercent, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
+                    TextField("Visceral fat level", value: $visceralFatLevel, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
+                    TextField("BMI", value: $bmi, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
+                }
+                Section { Text("Enter these values manually from the report. JourneyFit does not extract or alter your imported InBody image.").font(.footnote).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Log InBody result")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { context.insert(InBodyMeasurement(measuredAt: date, weightKg: weightKg, bodyFatPercent: bodyFatPercent, visceralFatLevel: visceralFatLevel, bmi: bmi)); try? context.save(); dismiss() } }
+            }
         }
     }
 }
@@ -1100,25 +1277,126 @@ struct SavedWorkoutDay: Identifiable {
 struct TemplatePicker: View {
     @Environment(\.dismiss) private var dismiss
     let choose: (WorkoutTemplate) -> Void
+    @AppStorage("journeyFit.customTemplates") private var savedTemplatesData = Data()
+    @State private var editor: TemplateEditorState?
+
+    private var customTemplates: [WorkoutTemplate] {
+        (try? JSONDecoder().decode([WorkoutTemplate].self, from: savedTemplatesData)) ?? []
+    }
+
+    private var templates: [WorkoutTemplate] { WorkoutTemplate.betaTemplates + customTemplates }
 
     var body: some View {
         NavigationStack {
-            List(WorkoutTemplate.betaTemplates) { template in
-                Button {
-                    choose(template)
-                    dismiss()
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(template.name).font(.headline)
-                        Text(template.subtitle).font(.subheadline).foregroundStyle(.secondary)
-                        Text(template.exercises.map(\.exercise).joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            List {
+                Section("BUILT-IN") {
+                    ForEach(WorkoutTemplate.betaTemplates) { template in
+                        templateRow(template)
                     }
-                    .padding(.vertical, 4)
                 }
-                .buttonStyle(.plain)
+                if !customTemplates.isEmpty {
+                    Section("MY TEMPLATES") {
+                        ForEach(customTemplates) { template in templateRow(template) }
+                            .onDelete { offsets in
+                                var updated = customTemplates
+                                updated.remove(atOffsets: offsets)
+                                save(updated)
+                            }
+                    }
+                }
             }
             .navigationTitle("Workout template")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button { editor = TemplateEditorState(template: WorkoutTemplate(name: "My workout", subtitle: "", exercises: []), isNew: true) } label: { Image(systemName: "plus") }
+                }
+            }
+            .sheet(item: $editor) { state in
+                TemplateEditor(template: state.template, isNew: state.isNew) { updated in
+                    var templates = customTemplates
+                    if let index = templates.firstIndex(where: { $0.id == updated.id }) { templates[index] = updated }
+                    else { templates.append(updated) }
+                    save(templates)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func templateRow(_ template: WorkoutTemplate) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                choose(template)
+                dismiss()
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(template.name).font(.headline)
+                    if !template.subtitle.isEmpty { Text(template.subtitle).font(.subheadline).foregroundStyle(.secondary) }
+                    Text(template.exercises.map(\.exercise).joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }.padding(.vertical, 4)
+            }.buttonStyle(.plain)
+            Button(template.isBuiltIn ? "Customize a copy" : "Edit") {
+                var editable = template
+                editable.isBuiltIn = false
+                if template.isBuiltIn { editable.id = UUID(); editable.name += " custom" }
+                editor = TemplateEditorState(template: editable, isNew: template.isBuiltIn)
+            }
+            .font(.caption.weight(.semibold)).buttonStyle(.borderless).foregroundStyle(JourneyFitTheme.accent)
+        }
+    }
+
+    private func save(_ templates: [WorkoutTemplate]) {
+        savedTemplatesData = (try? JSONEncoder().encode(templates)) ?? Data()
+    }
+}
+
+struct TemplateEditorState: Identifiable {
+    let id = UUID()
+    let template: WorkoutTemplate
+    let isNew: Bool
+}
+
+struct TemplateEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: WorkoutTemplate
+    let isNew: Bool
+    let save: (WorkoutTemplate) -> Void
+
+    init(template: WorkoutTemplate, isNew: Bool, save: @escaping (WorkoutTemplate) -> Void) {
+        _draft = State(initialValue: template)
+        self.isNew = isNew
+        self.save = save
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("TEMPLATE") {
+                    TextField("Name", text: $draft.name)
+                    TextField("Description (optional)", text: $draft.subtitle)
+                }
+                Section("EXERCISES") {
+                    ForEach($draft.exercises) { $item in
+                        VStack(alignment: .leading) {
+                            Picker("Muscle group", selection: $item.muscleGroup) {
+                                ForEach(ExerciseCatalog.muscleGroups, id: \.self) { Text($0).tag($0) }
+                            }
+                            .onChange(of: item.muscleGroup) { _, group in item.exercise = ExerciseCatalog.exercises(for: group).first ?? "" }
+                            Picker("Exercise", selection: $item.exercise) {
+                                ForEach(ExerciseCatalog.exercises(for: item.muscleGroup), id: \.self) { Text($0).tag($0) }
+                            }
+                        }
+                    }
+                    .onDelete { draft.exercises.remove(atOffsets: $0) }
+                    Button { draft.exercises.append(TemplateExercise(muscleGroup: ExerciseCatalog.muscleGroups.first ?? "Chest", exercise: ExerciseCatalog.exercises(for: ExerciseCatalog.muscleGroups.first ?? "Chest").first ?? "")) } label: { Label("Add exercise", systemImage: "plus") }
+                }
+            }
+            .navigationTitle(isNew ? "New template" : "Edit template")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines); guard !draft.name.isEmpty, !draft.exercises.isEmpty else { return }; save(draft); dismiss() } }
+            }
         }
     }
 }
@@ -1500,7 +1778,17 @@ struct JourneyFitBackupFile: Codable {
     let exportedAt: Date
     let workouts: [BackupWorkout]
     let inBodyReports: [BackupAttachment]
+    let inBodyMeasurements: [BackupInBodyMeasurement]?
     let generatedReports: [BackupAttachment]
+}
+
+struct BackupInBodyMeasurement: Codable {
+    let id: UUID
+    let measuredAt: Date
+    let weightKg: Double
+    let bodyFatPercent: Double
+    let visceralFatLevel: Double
+    let bmi: Double
 }
 
 struct BackupWorkout: Codable {
@@ -1531,12 +1819,13 @@ struct BackupAttachment: Codable {
 }
 
 enum JourneyFitBackup {
-    static func export(workouts: [StrengthWorkout], inBodyReports: [InBodyReport], generatedReports: [GeneratedReport]) throws -> URL {
+    static func export(workouts: [StrengthWorkout], inBodyReports: [InBodyReport], inBodyMeasurements: [InBodyMeasurement], generatedReports: [GeneratedReport]) throws -> URL {
         let backup = JourneyFitBackupFile(
-            version: 1,
+            version: 2,
             exportedAt: .now,
             workouts: workouts.map { workout in BackupWorkout(id: workout.id, startedAt: workout.startedAt, loggedAt: workout.loggedAt, note: workout.note, sets: workout.sets.map { set in BackupSet(id: set.id, loggedOrder: set.loggedOrder, exercise: set.exercise, muscleGroup: set.muscleGroup, weightKg: set.weightKg, reps: set.reps, rpe: set.rpe, isWarmup: set.isWarmup, takenToFailure: set.takenToFailure) }) },
             inBodyReports: inBodyReports.compactMap { report in guard let data = try? Data(contentsOf: try InBodyStorage.folder().appending(path: report.localFilename)) else { return nil }; return BackupAttachment(id: report.id, createdAt: report.createdAt, displayName: report.displayName, data: data) },
+            inBodyMeasurements: inBodyMeasurements.map { BackupInBodyMeasurement(id: $0.id, measuredAt: $0.measuredAt, weightKg: $0.weightKg, bodyFatPercent: $0.bodyFatPercent, visceralFatLevel: $0.visceralFatLevel, bmi: $0.bmi) },
             generatedReports: generatedReports.compactMap { report in guard let data = try? Data(contentsOf: ReportStorage.url(named: report.localFilename)) else { return nil }; return BackupAttachment(id: report.id, createdAt: report.createdAt, displayName: report.displayName, data: data) }
         )
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
@@ -1717,6 +2006,7 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
     @Query(sort: \InBodyReport.createdAt, order: .reverse) private var inBodyReports: [InBodyReport]
+    @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var inBodyMeasurements: [InBodyMeasurement]
     @Query(sort: \GeneratedReport.createdAt, order: .reverse) private var generatedReports: [GeneratedReport]
     @State private var backupURL: URL?
     @State private var showingImporter = false
@@ -1733,7 +2023,7 @@ struct SettingsView: View {
                         JourneyFitCard {
                             VStack(alignment: .leading, spacing: 12) {
                                 Label("Backup & Restore", systemImage: "externaldrive.badge.checkmark").font(.headline)
-                                Text("Back up all workouts, set logs, imported InBody images, and saved PDF reports as one portable JourneyFit backup file.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                                Text("Back up all workouts, set logs, InBody measurements and images, and saved PDF reports as one portable JourneyFit backup file.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
                                 Button { createBackup() } label: { Label("Create complete backup", systemImage: "arrow.down.doc") }.buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
                                 if let backupURL { ShareLink(item: backupURL) { Label("Save or share backup", systemImage: "square.and.arrow.up") }.buttonStyle(.bordered) }
                                 Button { showingImporter = true } label: { Label("Restore from backup", systemImage: "arrow.up.doc") }.buttonStyle(.bordered)
@@ -1754,7 +2044,7 @@ struct SettingsView: View {
 
     private func createBackup() {
         do {
-            backupURL = try JourneyFitBackup.export(workouts: workouts, inBodyReports: inBodyReports, generatedReports: generatedReports)
+            backupURL = try JourneyFitBackup.export(workouts: workouts, inBodyReports: inBodyReports, inBodyMeasurements: inBodyMeasurements, generatedReports: generatedReports)
             backupMessage = "Backup ready. Save it in Files or iCloud Drive so it survives an app deletion."
         } catch {
             backupMessage = "Could not create the backup."
@@ -1766,9 +2056,10 @@ struct SettingsView: View {
         defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
         do {
             let backup = try JourneyFitBackup.read(from: url)
-            guard backup.version == 1 else { backupMessage = "This backup version is not supported."; return }
+            guard backup.version == 1 || backup.version == 2 else { backupMessage = "This backup version is not supported."; return }
             let workoutIDs = Set(workouts.map(\.id))
             let inBodyIDs = Set(inBodyReports.map(\.id))
+            let measurementIDs = Set(inBodyMeasurements.map(\.id))
             let reportIDs = Set(generatedReports.map(\.id))
             var restoredWorkouts = 0
             var restoredFiles = 0
@@ -1784,6 +2075,9 @@ struct SettingsView: View {
                 let file = try InBodyStorage.save(data: attachment.data)
                 context.insert(InBodyReport(id: attachment.id, createdAt: attachment.createdAt, localFilename: file.lastPathComponent, displayName: attachment.displayName))
                 restoredFiles += 1
+            }
+            for measurement in backup.inBodyMeasurements ?? [] where !measurementIDs.contains(measurement.id) {
+                context.insert(InBodyMeasurement(id: measurement.id, measuredAt: measurement.measuredAt, weightKg: measurement.weightKg, bodyFatPercent: measurement.bodyFatPercent, visceralFatLevel: measurement.visceralFatLevel, bmi: measurement.bmi))
             }
             for attachment in backup.generatedReports where !reportIDs.contains(attachment.id) {
                 let file = try ReportStorage.save(data: attachment.data)
