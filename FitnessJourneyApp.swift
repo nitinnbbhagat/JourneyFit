@@ -391,6 +391,8 @@ struct LiftingProgressDashboard: View {
             }
     }
 
+    private var displayedPoints: [ProgressPoint] { Array(points.suffix(3)) }
+
     private func valueText(for point: ProgressPoint) -> String {
         metric == .weight ? "\(point.weight.formatted()) kg" : "\(point.totalReps) reps"
     }
@@ -416,13 +418,14 @@ struct LiftingProgressDashboard: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(JourneyFitTheme.accent)
-            if points.isEmpty {
+            if displayedPoints.isEmpty {
                 JourneyFitCard { Text("Log a strength workout to see your progress over time.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted) }
             } else {
                 JourneyFitCard {
                     VStack(alignment: .leading, spacing: 14) {
                         Picker("Metric", selection: $metric) { ForEach(ProgressMetric.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-                        Chart(points) { point in
+                        Text("Latest \(displayedPoints.count) logged session\(displayedPoints.count == 1 ? "" : "s")").font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
+                        Chart(displayedPoints) { point in
                             LineMark(x: .value("Session", point.date), y: .value(metric.chartTitle, metric == .weight ? point.weight : Double(point.totalReps)))
                                 .foregroundStyle(JourneyFitTheme.accent).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                             PointMark(x: .value("Session", point.date), y: .value(metric.chartTitle, metric == .weight ? point.weight : Double(point.totalReps)))
@@ -431,7 +434,7 @@ struct LiftingProgressDashboard: View {
                                     Text(valueText(for: point)).font(.caption2.weight(.bold)).foregroundStyle(JourneyFitTheme.ink)
                                 }
                         }
-                        .chartXAxis { AxisMarks(values: points.map(\.date)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+                        .chartXAxis { AxisMarks(values: displayedPoints.map(\.date)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
                         .chartYAxis { AxisMarks(position: .leading) }
                         .frame(height: 190)
                     }
