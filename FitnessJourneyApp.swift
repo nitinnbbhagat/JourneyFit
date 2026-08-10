@@ -4,6 +4,7 @@ import HealthKit
 import PhotosUI
 import PDFKit
 import UIKit
+import Vision
 import UniformTypeIdentifiers
 import Charts
 
@@ -268,7 +269,7 @@ struct RootView: View {
 }
 
 private enum AppTab: Hashable {
-    case today, log, progress, history, profile
+    case today, log, progress, reports, profile
 }
 
 struct AppTabView: View {
@@ -284,11 +285,8 @@ struct AppTabView: View {
                 .tabItem { Label("Log", systemImage: "plus.circle.fill") }.tag(AppTab.log)
             ProgressView()
                 .tabItem { Label("Progress", systemImage: "chart.line.uptrend.xyaxis") }.tag(AppTab.progress)
-            ReportsView(openWorkout: { workoutID in
-                requestedWorkoutID = workoutID
-                selectedTab = .log
-            })
-                .tabItem { Label("History", systemImage: "calendar") }.tag(AppTab.history)
+            ReportsView()
+                .tabItem { Label("Reports", systemImage: "doc.richtext") }.tag(AppTab.reports)
             SettingsView().tabItem { Label("Profile", systemImage: "person.crop.circle") }.tag(AppTab.profile)
         }
         .environmentObject(health)
@@ -552,7 +550,6 @@ struct ProgressView: View {
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
     @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var inBodyMeasurements: [InBodyMeasurement]
     @State private var range: ProgressRange = .twelveWeeks
-    @State private var showingInBodyEditor = false
 
     private var rangeWorkouts: [StrengthWorkout] {
         guard let days = range.dayCount,
@@ -587,15 +584,12 @@ struct ProgressView: View {
                             }
                         }
                         LiftingProgressDashboard(workouts: rangeWorkouts, sessionLimit: 5)
-                        InBodyProgressDashboard(measurements: rangeInBodyMeasurements) {
-                            showingInBodyEditor = true
-                        }
+                        InBodyProgressDashboard(measurements: rangeInBodyMeasurements)
                     }
                     .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 28)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .sheet(isPresented: $showingInBodyEditor) { InBodyMeasurementEditor().presentationDetents([.large]) }
         }
     }
 }
@@ -617,7 +611,6 @@ struct InBodyProgressDashboard: View {
     }
 
     let measurements: [InBodyMeasurement]
-    let addMeasurement: () -> Void
     @State private var metric: Metric = .weight
 
     private var points: [Point] {
@@ -630,18 +623,13 @@ struct InBodyProgressDashboard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("INBODY PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
-                Spacer()
-                Button("Log result", action: addMeasurement).font(.caption.weight(.semibold))
-            }
+            Text("INBODY PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
             JourneyFitCard {
                 if points.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("No measurements yet").font(.headline)
-                        Text("Enter the values from your InBody result to build a private trend. Imported report images remain unchanged.")
+                        Text("Import an InBody report from Reports. JourneyFit reads the result and asks you to confirm it before adding the trend.")
                             .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
-                        Button("Log InBody result", action: addMeasurement).buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 14) {
@@ -707,26 +695,44 @@ struct InBodyProgressDashboard: View {
     }
 }
 
+struct InBodyDetectedValues: Identifiable {
+    let id = UUID()
+    let weightKg: Double?
+    let bodyFatPercent: Double?
+    let visceralFatLevel: Double?
+    let bmi: Double?
+    var isComplete: Bool { weightKg != nil && bodyFatPercent != nil && visceralFatLevel != nil && bmi != nil }
+}
+
 struct InBodyMeasurementEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
     @State private var date = Calendar.current.startOfDay(for: .now)
-    @State private var weightKg = 70.0
-    @State private var bodyFatPercent = 20.0
-    @State private var visceralFatLevel = 8.0
-    @State private var bmi = 22.0
+    @State private var weightKg: Double
+    @State private var bodyFatPercent: Double
+    @State private var visceralFatLevel: Double
+    @State private var bmi: Double
+    let detectedValues: InBodyDetectedValues
+
+    init(detectedValues: InBodyDetectedValues) {
+        self.detectedValues = detectedValues
+        _weightKg = State(initialValue: detectedValues.weightKg ?? 0)
+        _bodyFatPercent = State(initialValue: detectedValues.bodyFatPercent ?? 0)
+        _visceralFatLevel = State(initialValue: detectedValues.visceralFatLevel ?? 0)
+        _bmi = State(initialValue: detectedValues.bmi ?? 0)
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("FROM YOUR INBODY RESULT") {
+                Section(detectedValues.isComplete ? "READ FROM YOUR INBODY REPORT" : "CHECK THE DETECTED INBODY VALUES") {
                     DatePicker("Measurement date", selection: $date, in: ...Date.now, displayedComponents: .date)
                     TextField("Weight (kg)", value: $weightKg, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
                     TextField("Body fat (%)", value: $bodyFatPercent, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
                     TextField("Visceral fat level", value: $visceralFatLevel, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
                     TextField("BMI", value: $bmi, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
                 }
-                Section { Text("Enter these values manually from the report. JourneyFit does not extract or alter your imported InBody image.").font(.footnote).foregroundStyle(.secondary) }
+                Section { Text(detectedValues.isComplete ? "JourneyFit read these values from the imported report. Confirm them before saving the trend." : "Some values could not be confidently read. Correct the highlighted values from the imported report before saving.").font(.footnote).foregroundStyle(.secondary) }
             }
             .navigationTitle("Log InBody result")
             .toolbar {
@@ -1006,16 +1012,8 @@ struct WorkoutLogView: View {
                                             .tint(JourneyFitTheme.accent)
                                         }
                                         if expandedExerciseIDs.contains(group.id) {
-                                            ForEach(Array(group.setIDs.enumerated()), id: \.element) { displayIndex, setID in
-                                                if let set = workout.sets.first(where: { $0.id == setID }) {
-                                                    HStack {
-                                                        Text("Set \(displayIndex + 1)").font(.subheadline.weight(.semibold))
-                                                        Spacer()
-                                                        Text("\(set.weightKg.formatted()) kg × \(set.reps)").font(.subheadline.weight(.semibold))
-                                                        Button { editor = SetEditor(seed: nil, existingSet: set, recentSets: recentSets) } label: { Image(systemName: "pencil.circle") }.buttonStyle(.borderless).accessibilityLabel("Edit set \(displayIndex + 1)")
-                                                        Button(role: .destructive) { if let index = workout.sets.firstIndex(where: { $0.id == setID }) { workout.sets.remove(at: index) } } label: { Image(systemName: "trash") }.buttonStyle(.borderless).accessibilityLabel("Delete set \(displayIndex + 1)")
-                                                    }
-                                                }
+                                            ForEach(displaySets(for: group)) { item in
+                                                setRow(item.set, displayIndex: item.displayIndex, setID: item.id)
                                             }
                                         }
                                         Button {
@@ -1084,7 +1082,7 @@ struct WorkoutLogView: View {
                     }
                 }.presentationDetents([.large])
             }
-            .sheet(isPresented: $showingDatePicker) { WorkoutDatePicker(selectedDate: $selectedDate).presentationDetents([.large]) }
+            .sheet(isPresented: $showingDatePicker) { WorkoutDatePicker(selectedDate: $selectedDate, loggedDates: savedWorkoutDays.map(\.date)).presentationDetents([.large]) }
             .sheet(isPresented: $showingTemplates) {
                 TemplatePicker { template in
                     apply(template: template)
@@ -1094,24 +1092,14 @@ struct WorkoutLogView: View {
             }
             .sheet(isPresented: $showingAllSessions) {
                 NavigationStack {
-                    VStack(spacing: 20) {
-                        DatePicker("Select a logged workout date", selection: $historyCalendarDate, in: ...Date.now, displayedComponents: .date)
-                            .datePickerStyle(.graphical)
-                            .padding(.horizontal)
-                        if let day = savedWorkoutDays.first(where: { Calendar.current.isDate($0.date, inSameDayAs: historyCalendarDate) }) {
-                            Button { openSavedDay(day) } label: {
-                                JourneyFitCard {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text("Workout found").font(.headline).foregroundStyle(JourneyFitTheme.ink)
-                                        Text("\(day.setCount) sets · \(day.totalReps) reps · \(day.exerciseCount) exercises").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.horizontal, 20)
-                        } else {
-                            ContentUnavailableView("No logged workout", systemImage: "calendar", description: Text("Choose a date that has a saved JourneyFit workout."))
+                    VStack(spacing: 16) {
+                        WorkoutCalendar(selectedDate: Binding(get: { historyCalendarDate }, set: { historyCalendarDate = $0 ?? historyCalendarDate }), loggedDates: savedWorkoutDays.map(\.date)) { date in
+                            historyCalendarDate = date
+                            if let day = savedWorkoutDays.first(where: { Calendar.current.isDate($0.date, inSameDayAs: date) }) { openSavedDay(day) }
                         }
+                        .padding(.horizontal, 12)
+                        Label("A dot marks a day with a saved JourneyFit workout.", systemImage: "circle.fill")
+                            .font(.footnote).foregroundStyle(JourneyFitTheme.muted)
                         Spacer()
                     }
                     .navigationTitle("Workout calendar")
@@ -1127,6 +1115,27 @@ struct WorkoutLogView: View {
 
     private func totalReps(for group: DraftExerciseGroup) -> Int {
         workout.sets.filter { group.setIDs.contains($0.id) }.reduce(0) { $0 + $1.reps }
+    }
+
+    private func displaySets(for group: DraftExerciseGroup) -> [DisplayedSet] {
+        group.setIDs.enumerated().compactMap { index, id in
+            workout.sets.first(where: { $0.id == id }).map { DisplayedSet(id: id, displayIndex: index, set: $0) }
+        }
+    }
+
+    @ViewBuilder
+    private func setRow(_ set: LiftSet, displayIndex: Int, setID: UUID) -> some View {
+        HStack {
+            Text("Set \(displayIndex + 1)").font(.subheadline.weight(.semibold))
+            Spacer()
+            Text("\(set.weightKg.formatted()) kg × \(set.reps)").font(.subheadline.weight(.semibold))
+            Button { editor = SetEditor(seed: nil, existingSet: set, recentSets: recentSets) } label: { Image(systemName: "pencil.circle") }
+                .buttonStyle(.borderless).accessibilityLabel("Edit set \(displayIndex + 1)")
+            Button(role: .destructive) {
+                if let index = workout.sets.firstIndex(where: { $0.id == setID }) { workout.sets.remove(at: index) }
+            } label: { Image(systemName: "trash") }
+                .buttonStyle(.borderless).accessibilityLabel("Delete set \(displayIndex + 1)")
+        }
     }
 
     private var recentSets: [LiftSet] {
@@ -1262,6 +1271,12 @@ struct DraftExerciseGroup: Identifiable {
     let muscleGroup: String
     let exercise: String
     let setIDs: [UUID]
+}
+
+struct DisplayedSet: Identifiable {
+    let id: UUID
+    let displayIndex: Int
+    let set: LiftSet
 }
 
 struct SavedWorkoutDay: Identifiable {
@@ -1520,20 +1535,69 @@ enum WeightUnit: String, CaseIterable, Identifiable {
 struct WorkoutDatePicker: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var selectedDate: Date?
-    @State private var dates: Set<DateComponents> = []
+    let loggedDates: [Date]
 
     var body: some View {
         NavigationStack {
-            MultiDatePicker("Workout date", selection: $dates, in: ..<Date.now)
-            .padding().navigationTitle("Workout date")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-            .onChange(of: dates) { _, newValue in
-                guard let components = newValue.first, let date = WeekCalendar.mondayFirst.date(from: components) else { return }
-                selectedDate = date
-                dismiss()
+            VStack(spacing: 16) {
+                WorkoutCalendar(selectedDate: $selectedDate, loggedDates: loggedDates) { date in
+                    selectedDate = date
+                    dismiss()
+                }
+                Label("A dot marks a day with a saved JourneyFit workout.", systemImage: "circle.fill")
+                    .font(.footnote).foregroundStyle(JourneyFitTheme.muted)
+                Spacer()
             }
+            .padding(.top, 8).navigationTitle("Workout date")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
         .environment(\.calendar, WeekCalendar.mondayFirst)
+    }
+}
+
+struct WorkoutCalendar: UIViewRepresentable {
+    @Binding var selectedDate: Date?
+    let loggedDates: [Date]
+    let onSelect: (Date) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIView(context: Context) -> UICalendarView {
+        let calendarView = UICalendarView()
+        calendarView.calendar = WeekCalendar.mondayFirst
+        calendarView.locale = .current
+        calendarView.fontDesign = .rounded
+        calendarView.availableDateRange = DateInterval(start: Date(timeIntervalSince1970: 0), end: .now)
+        let selection = UICalendarSelectionSingleDate(delegate: context.coordinator)
+        if let selectedDate { selection.selectedDate = WeekCalendar.mondayFirst.dateComponents([.calendar, .year, .month, .day], from: selectedDate) }
+        calendarView.selectionBehavior = selection
+        context.coordinator.calendarView = calendarView
+        return calendarView
+    }
+
+    func updateUIView(_ uiView: UICalendarView, context: Context) {
+        context.coordinator.parent = self
+        let components = loggedDates.map { WeekCalendar.mondayFirst.dateComponents([.calendar, .year, .month, .day], from: $0) }
+        uiView.reloadDecorations(forDateComponents: components, animated: true)
+    }
+
+    final class Coordinator: NSObject, UICalendarViewDelegate, UICalendarSelectionSingleDateDelegate {
+        var parent: WorkoutCalendar
+        weak var calendarView: UICalendarView?
+
+        init(parent: WorkoutCalendar) { self.parent = parent }
+
+        func calendarView(_ calendarView: UICalendarView, decorationFor dateComponents: DateComponents) -> UICalendarView.Decoration? {
+            guard let date = WeekCalendar.mondayFirst.date(from: dateComponents),
+                  parent.loggedDates.contains(where: { Calendar.current.isDate($0, inSameDayAs: date) }) else { return nil }
+            return .default(color: .systemBlue, size: .medium)
+        }
+
+        func dateSelection(_ selection: UICalendarSelectionSingleDate, didSelectDate dateComponents: DateComponents?) {
+            guard let dateComponents, let date = WeekCalendar.mondayFirst.date(from: dateComponents) else { return }
+            parent.selectedDate = Calendar.current.startOfDay(for: date)
+            parent.onSelect(Calendar.current.startOfDay(for: date))
+        }
     }
 }
 
@@ -1576,7 +1640,6 @@ struct ReportDatePicker: View {
 
 struct ReportsView: View {
     @Environment(\.modelContext) private var context
-    let openWorkout: (UUID) -> Void
     @Query(sort: \InBodyReport.createdAt, order: .reverse) private var inBodyReports: [InBodyReport]
     @Query(sort: \GeneratedReport.createdAt, order: .reverse) private var generatedReports: [GeneratedReport]
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
@@ -1591,14 +1654,7 @@ struct ReportsView: View {
     @State private var reportToDelete: GeneratedReport?
     @State private var startDate = HealthKitManager.mondayThroughSunday().start
     @State private var endDate = HealthKitManager.mondayThroughSunday().end.addingTimeInterval(-1)
-    @State private var historyDate = Calendar.current.startOfDay(for: .now)
-
-    private var selectedHistoryWorkout: StrengthWorkout? {
-        workouts
-            .filter { Calendar.current.isDate($0.startedAt, inSameDayAs: historyDate) }
-            .sorted { $0.loggedAt < $1.loggedAt }
-            .first
-    }
+    @State private var detectedInBodyValues: InBodyDetectedValues?
 
     var body: some View {
         NavigationStack {
@@ -1606,31 +1662,8 @@ struct ReportsView: View {
                 JourneyFitTheme.background.ignoresSafeArea()
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 20) {
-                        Text("HISTORY & REPORTS").font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(JourneyFitTheme.accent)
+                        Text("REPORTS").font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(JourneyFitTheme.accent)
                         Text("Review the work.\nShare the story.").font(.system(size: 30, weight: .bold, design: .rounded)).foregroundStyle(JourneyFitTheme.ink)
-                        JourneyFitCard {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Label("WORKOUT HISTORY", systemImage: "calendar").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
-                                DatePicker("Logged workout date", selection: $historyDate, in: ...Date.now, displayedComponents: .date)
-                                    .datePickerStyle(.graphical)
-                                if let workout = selectedHistoryWorkout {
-                                    Button { openWorkout(workout.id) } label: {
-                                        HStack {
-                                            VStack(alignment: .leading, spacing: 3) {
-                                                Text("Open logged workout").font(.headline)
-                                                Text("\(workout.sets.count) sets · \(workout.sets.reduce(0) { $0 + $1.reps }) reps · \(Set(workout.sets.map(\.exercise)).count) exercises")
-                                                    .font(.caption).foregroundStyle(JourneyFitTheme.muted)
-                                            }
-                                            Spacer()
-                                            Image(systemName: "pencil.circle.fill").foregroundStyle(JourneyFitTheme.accent)
-                                        }
-                                    }
-                                    .buttonStyle(.bordered)
-                                } else {
-                                    Text("No JourneyFit workout logged on this date.").font(.caption).foregroundStyle(JourneyFitTheme.muted)
-                                }
-                            }
-                        }
                         JourneyFitCard {
                             VStack(alignment: .leading, spacing: 14) {
                                 Label("REPORT PERIOD", systemImage: "calendar.badge.clock").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
@@ -1646,7 +1679,7 @@ struct ReportsView: View {
                         JourneyFitCard {
                             VStack(alignment: .leading, spacing: 12) {
                                 Label("INBODY REPORT", systemImage: "doc.viewfinder").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
-                                Text("Add an InBody image only when you want to append it to this report.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                                Text("Import an InBody image to append it unchanged to this report. JourneyFit also reads its measurements for your Progress trend.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
                                 PhotosPicker(selection: $selectedPhoto, matching: .images) { Label("Add InBody report", systemImage: "photo.badge.plus") }.buttonStyle(.bordered).tint(JourneyFitTheme.accent)
                                 if let attachedName = selectedInBodyName {
                                     HStack { Image(systemName: "checkmark.circle.fill").foregroundStyle(JourneyFitTheme.success); Text("Attached: \(attachedName)").font(.subheadline); Spacer(); Button { selectedInBodyIDs.removeAll(); selectedInBodyName = nil } label: { Image(systemName: "xmark.circle") }.buttonStyle(.borderless).accessibilityLabel("Remove InBody attachment") }
@@ -1683,6 +1716,7 @@ struct ReportsView: View {
                 .presentationDetents([.large])
             }
             .sheet(isPresented: $showingPreview) { if let exportURL { PDFPreviewScreen(url: exportURL) } }
+            .sheet(item: $detectedInBodyValues) { values in InBodyMeasurementEditor(detectedValues: values).presentationDetents([.large]) }
             .alert("Delete saved report?", isPresented: Binding(get: { reportToDelete != nil }, set: { if !$0 { reportToDelete = nil } }), presenting: reportToDelete) { report in
                 Button("Delete", role: .destructive) { deleteSavedReport(report) }
                 Button("Cancel", role: .cancel) { reportToDelete = nil }
@@ -1704,7 +1738,13 @@ struct ReportsView: View {
             context.insert(report)
             selectedInBodyIDs = [report.id]
             selectedInBodyName = report.displayName
-            try context.save(); showToast("InBody image added unchanged.")
+            try context.save()
+            if let detected = await InBodyReportReader.read(data), detected.weightKg != nil || detected.bodyFatPercent != nil || detected.visceralFatLevel != nil || detected.bmi != nil {
+                detectedInBodyValues = detected
+                showToast(detected.isComplete ? "InBody result read. Confirm the values." : "Some InBody values need review.")
+            } else {
+                showToast("InBody image added unchanged. Measurements could not be read.")
+            }
         } catch { showToast("Could not save the InBody image.") }
         selectedPhoto = nil
     }
@@ -1759,6 +1799,45 @@ enum InBodyStorage {
     static func folder() throws -> URL { let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "inbody-reports"); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
     static func save(data: Data) throws -> URL { let url = try folder().appending(path: "\(UUID().uuidString).jpg"); try data.write(to: url, options: .atomic); return url }
     static func image(named filename: String) -> UIImage? { try? UIImage(data: Data(contentsOf: try folder().appending(path: filename))) }
+}
+
+enum InBodyReportReader {
+    static func read(_ data: Data) async -> InBodyDetectedValues? {
+        guard let image = UIImage(data: data), let cgImage = image.cgImage else { return nil }
+        return await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, _ in
+                let lines = (request.results as? [VNRecognizedTextObservation])?.compactMap { $0.topCandidates(1).first?.string } ?? []
+                continuation.resume(returning: parse(lines))
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+            }
+        }
+    }
+
+    private static func parse(_ lines: [String]) -> InBodyDetectedValues {
+        let text = lines.joined(separator: " ")
+        return InBodyDetectedValues(
+            weightKg: firstNumber(in: text, labels: ["Weight"]),
+            bodyFatPercent: firstNumber(in: text, labels: ["Percent Body Fat", "Body Fat %", "PBF"]),
+            visceralFatLevel: firstNumber(in: text, labels: ["Visceral Fat Level", "Visceral Fat", "VFL"]),
+            bmi: firstNumber(in: text, labels: ["BMI"])
+        )
+    }
+
+    private static func firstNumber(in text: String, labels: [String]) -> Double? {
+        for label in labels {
+            let escaped = NSRegularExpression.escapedPattern(for: label).replacingOccurrences(of: "\\ ", with: "\\s+")
+            let pattern = "(?i)\\b\(escaped)\\b[^0-9]{0,18}([0-9]{1,3}(?:\\.[0-9]{1,2})?)"
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let range = Range(match.range(at: 1), in: text) else { continue }
+            return Double(text[range])
+        }
+        return nil
+    }
 }
 
 enum ReportStorage {
