@@ -4,7 +4,7 @@ import HealthKit
 import PhotosUI
 import PDFKit
 import UIKit
-import Vision
+@preconcurrency import Vision
 import UniformTypeIdentifiers
 import Charts
 
@@ -85,8 +85,8 @@ final class InBodyReport {
     }
 }
 
-/// Measurements are deliberately entered by the person from their InBody result.
-/// JourneyFit preserves imported InBody images unchanged and never OCRs them.
+/// Imported InBody images are preserved unchanged. Recognition is used only to
+/// prefill a separate, user-confirmed measurement record for Progress.
 @Model
 final class InBodyMeasurement {
     var id: UUID = UUID()
@@ -379,10 +379,16 @@ struct DashboardView: View {
                                     .buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
                             }
                         }
-                        if let insight = trainingInsight {
+                        if !trainingInsights.isEmpty {
                             JourneyFitCard {
-                                Label(insight, systemImage: "chart.line.uptrend.xyaxis")
-                                    .font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.ink)
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Label("TRAINING INSIGHTS", systemImage: "chart.line.uptrend.xyaxis")
+                                        .font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
+                                    ForEach(trainingInsights) { insight in
+                                        Label(insight.message, systemImage: insight.symbol)
+                                            .font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.ink)
+                                    }
+                                }
                             }
                         }
                     }
@@ -422,18 +428,32 @@ struct DashboardView: View {
         }
     }
 
-    private var trainingInsight: String? {
+    private struct TrainingInsight: Identifiable {
+        let id: String
+        let message: String
+        let symbol: String
+    }
+
+    private var trainingInsights: [TrainingInsight] {
         let ordered = strengthWorkouts.sorted { $0.loggedAt > $1.loggedAt }
-        guard let latest = ordered.first else { return nil }
-        let exercises = Set(latest.sets.map(\.exercise))
-        guard let exercise = exercises.sorted().first,
-              let previous = ordered.dropFirst().first(where: { $0.sets.contains(where: { $0.exercise == exercise }) }) else {
-            return "Your latest session is ready to review in Progress."
+        guard let latest = ordered.first else { return [] }
+        var seen = Set<String>()
+        let exercises = latest.sets.sorted { $0.loggedOrder < $1.loggedOrder }.map(\.exercise).filter { seen.insert($0).inserted }
+        return exercises.map { exercise in
+            let currentSets = latest.sets.filter { $0.exercise == exercise }
+            guard let previous = ordered.dropFirst().first(where: { $0.sets.contains(where: { $0.exercise == exercise }) }) else {
+                return TrainingInsight(id: exercise, message: "\(exercise): first logged session—your baseline is set.", symbol: "flag.checkered")
+            }
+            let currentReps = currentSets.reduce(0) { $0 + $1.reps }
+            let previousReps = previous.sets.filter { $0.exercise == exercise }.reduce(0) { $0 + $1.reps }
+            let currentWeight = currentSets.map(\.weightKg).max() ?? 0
+            let previousWeight = previous.sets.filter { $0.exercise == exercise }.map(\.weightKg).max() ?? 0
+            if currentWeight > previousWeight {
+                return TrainingInsight(id: exercise, message: "\(exercise): +\((currentWeight - previousWeight).formatted()) kg vs your previous session.", symbol: "arrow.up.right")
+            }
+            let delta = currentReps - previousReps
+            return TrainingInsight(id: exercise, message: delta == 0 ? "\(exercise): matched your previous session." : "\(exercise): \(delta > 0 ? "+" : "")\(delta) reps vs your previous session.", symbol: delta >= 0 ? "chart.line.uptrend.xyaxis" : "arrow.down.right")
         }
-        let currentReps = latest.sets.filter { $0.exercise == exercise }.reduce(0) { $0 + $1.reps }
-        let previousReps = previous.sets.filter { $0.exercise == exercise }.reduce(0) { $0 + $1.reps }
-        let delta = currentReps - previousReps
-        return delta == 0 ? "\(exercise): matched your previous session." : "\(exercise): \(delta > 0 ? "+" : "")\(delta) reps vs your previous session."
     }
 }
 
@@ -595,6 +615,7 @@ struct ProgressView: View {
 }
 
 struct InBodyProgressDashboard: View {
+    @Environment(\.modelContext) private var context
     enum Metric: String, CaseIterable, Identifiable {
         case weight = "Weight"
         case bodyFat = "Body fat %"
@@ -612,6 +633,9 @@ struct InBodyProgressDashboard: View {
 
     let measurements: [InBodyMeasurement]
     @State private var metric: Metric = .weight
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var detectedValues: InBodyDetectedValues?
+    @State private var importMessage: String?
 
     private var points: [Point] {
         measurements.sorted { $0.measuredAt < $1.measuredAt }.map {
@@ -623,12 +647,18 @@ struct InBodyProgressDashboard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("INBODY PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
+            HStack {
+                Text("INBODY PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
+                Spacer()
+                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                    Label("Import report", systemImage: "photo.badge.plus").font(.caption.weight(.semibold))
+                }
+            }
             JourneyFitCard {
                 if points.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("No measurements yet").font(.headline)
-                        Text("Import an InBody report from Reports. JourneyFit reads the result and asks you to confirm it before adding the trend.")
+                        Text("Import an InBody report here. JourneyFit reads the result and asks you to confirm it before adding the trend.")
                             .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
                     }
                 } else {
@@ -665,6 +695,23 @@ struct InBodyProgressDashboard: View {
                 }
             }
         }
+        .onChange(of: selectedPhoto) { _, item in Task { await importReport(item) } }
+        .sheet(item: $detectedValues) { values in InBodyMeasurementEditor(detectedValues: values).presentationDetents([.large]) }
+        .alert("InBody import", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) { Button("OK", role: .cancel) {} } message: { Text(importMessage ?? "") }
+    }
+
+    private func importReport(_ item: PhotosPickerItem?) async {
+        guard let item, let data = try? await item.loadTransferable(type: Data.self) else { return }
+        defer { selectedPhoto = nil }
+        if let url = try? InBodyStorage.save(data: data) {
+            context.insert(InBodyReport(localFilename: url.lastPathComponent, displayName: "InBody report · \(Date.now.formatted(date: .abbreviated, time: .omitted))"))
+            try? context.save()
+        }
+        guard let values = await InBodyReportReader.read(data), values.weightKg != nil || values.bodyFatPercent != nil || values.visceralFatLevel != nil || values.bmi != nil else {
+            importMessage = "JourneyFit could not read measurements from this image. Try a clear, uncropped InBody report."
+            return
+        }
+        detectedValues = values
     }
 
     private func value(for measurement: InBodyMeasurement) -> Double {
@@ -987,7 +1034,6 @@ struct WorkoutLogView: View {
                                 }
                             }
                         } else {
-                            RestTimerCard()
                             ForEach(exerciseGroups) { group in
                                 JourneyFitCard {
                                     VStack(alignment: .leading, spacing: 10) {
@@ -1292,33 +1338,24 @@ struct SavedWorkoutDay: Identifiable {
 struct TemplatePicker: View {
     @Environment(\.dismiss) private var dismiss
     let choose: (WorkoutTemplate) -> Void
-    @AppStorage("journeyFit.customTemplates") private var savedTemplatesData = Data()
+    @AppStorage("journeyFit.customTemplates") private var legacyTemplatesData = Data()
+    @AppStorage("journeyFit.templates") private var savedTemplatesData = Data()
+    @AppStorage("journeyFit.templatesMigrated") private var templatesMigrated = false
     @State private var editor: TemplateEditorState?
 
-    private var customTemplates: [WorkoutTemplate] {
-        (try? JSONDecoder().decode([WorkoutTemplate].self, from: savedTemplatesData)) ?? []
+    private var templates: [WorkoutTemplate] {
+        (try? JSONDecoder().decode([WorkoutTemplate].self, from: savedTemplatesData)) ?? WorkoutTemplate.betaTemplates
     }
-
-    private var templates: [WorkoutTemplate] { WorkoutTemplate.betaTemplates + customTemplates }
 
     var body: some View {
         NavigationStack {
             List {
-                Section("BUILT-IN") {
-                    ForEach(WorkoutTemplate.betaTemplates) { template in
-                        templateRow(template)
+                ForEach(templates) { template in templateRow(template) }
+                    .onDelete { offsets in
+                        var updated = templates
+                        updated.remove(atOffsets: offsets)
+                        save(updated)
                     }
-                }
-                if !customTemplates.isEmpty {
-                    Section("MY TEMPLATES") {
-                        ForEach(customTemplates) { template in templateRow(template) }
-                            .onDelete { offsets in
-                                var updated = customTemplates
-                                updated.remove(atOffsets: offsets)
-                                save(updated)
-                            }
-                    }
-                }
             }
             .navigationTitle("Workout template")
             .toolbar {
@@ -1329,12 +1366,13 @@ struct TemplatePicker: View {
             }
             .sheet(item: $editor) { state in
                 TemplateEditor(template: state.template, isNew: state.isNew) { updated in
-                    var templates = customTemplates
-                    if let index = templates.firstIndex(where: { $0.id == updated.id }) { templates[index] = updated }
-                    else { templates.append(updated) }
-                    save(templates)
+                    var updatedTemplates = templates
+                    if let index = updatedTemplates.firstIndex(where: { $0.id == updated.id }) { updatedTemplates[index] = updated }
+                    else { updatedTemplates.append(updated) }
+                    save(updatedTemplates)
                 }
             }
+            .onAppear { migrateTemplatesIfNeeded() }
         }
     }
 
@@ -1351,11 +1389,8 @@ struct TemplatePicker: View {
                     Text(template.exercises.map(\.exercise).joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }.padding(.vertical, 4)
             }.buttonStyle(.plain)
-            Button(template.isBuiltIn ? "Customize a copy" : "Edit") {
-                var editable = template
-                editable.isBuiltIn = false
-                if template.isBuiltIn { editable.id = UUID(); editable.name += " custom" }
-                editor = TemplateEditorState(template: editable, isNew: template.isBuiltIn)
+            Button("Edit") {
+                editor = TemplateEditorState(template: template, isNew: false)
             }
             .font(.caption.weight(.semibold)).buttonStyle(.borderless).foregroundStyle(JourneyFitTheme.accent)
         }
@@ -1363,6 +1398,13 @@ struct TemplatePicker: View {
 
     private func save(_ templates: [WorkoutTemplate]) {
         savedTemplatesData = (try? JSONEncoder().encode(templates)) ?? Data()
+    }
+
+    private func migrateTemplatesIfNeeded() {
+        guard !templatesMigrated else { return }
+        let legacy = (try? JSONDecoder().decode([WorkoutTemplate].self, from: legacyTemplatesData)) ?? []
+        save(WorkoutTemplate.betaTemplates + legacy)
+        templatesMigrated = true
     }
 }
 
@@ -1411,42 +1453,6 @@ struct TemplateEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines); guard !draft.name.isEmpty, !draft.exercises.isEmpty else { return }; save(draft); dismiss() } }
-            }
-        }
-    }
-}
-
-struct RestTimerCard: View {
-    @State private var endDate: Date?
-
-    private var remaining: Int {
-        guard let endDate else { return 0 }
-        return max(0, Int(endDate.timeIntervalSinceNow.rounded(.up)))
-    }
-
-    var body: some View {
-        JourneyFitCard {
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                HStack(spacing: 12) {
-                    Image(systemName: remaining > 0 ? "timer" : "timer.circle").foregroundStyle(JourneyFitTheme.accent)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(remaining > 0 ? "Rest: \(remaining / 60):\(String(format: "%02d", remaining % 60))" : "Rest timer")
-                            .font(.headline)
-                        Text(remaining > 0 ? "Take the time you need." : "Start a quick recovery timer between sets.")
-                            .font(.caption).foregroundStyle(JourneyFitTheme.muted)
-                    }
-                    Spacer()
-                    if remaining > 0 {
-                        Button("Stop") { endDate = nil }.buttonStyle(.bordered)
-                    } else {
-                        Menu("Start") {
-                            Button("60 seconds") { endDate = .now.addingTimeInterval(60) }
-                            Button("90 seconds") { endDate = .now.addingTimeInterval(90) }
-                            Button("2 minutes") { endDate = .now.addingTimeInterval(120) }
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
             }
         }
     }
@@ -1567,11 +1573,14 @@ struct WorkoutCalendar: UIViewRepresentable {
         calendarView.calendar = WeekCalendar.mondayFirst
         calendarView.locale = .current
         calendarView.fontDesign = .rounded
+        calendarView.delegate = context.coordinator
         calendarView.availableDateRange = DateInterval(start: Date(timeIntervalSince1970: 0), end: .now)
         let selection = UICalendarSelectionSingleDate(delegate: context.coordinator)
         if let selectedDate { selection.selectedDate = WeekCalendar.mondayFirst.dateComponents([.calendar, .year, .month, .day], from: selectedDate) }
         calendarView.selectionBehavior = selection
         context.coordinator.calendarView = calendarView
+        let loggedComponents = loggedDates.map { WeekCalendar.mondayFirst.dateComponents([.calendar, .year, .month, .day], from: $0) }
+        calendarView.reloadDecorations(forDateComponents: loggedComponents, animated: false)
         return calendarView
     }
 
@@ -1590,7 +1599,7 @@ struct WorkoutCalendar: UIViewRepresentable {
         func calendarView(_ calendarView: UICalendarView, decorationFor dateComponents: DateComponents) -> UICalendarView.Decoration? {
             guard let date = WeekCalendar.mondayFirst.date(from: dateComponents),
                   parent.loggedDates.contains(where: { Calendar.current.isDate($0, inSameDayAs: date) }) else { return nil }
-            return .default(color: .systemBlue, size: .medium)
+            return .default(color: .systemBlue, size: .large)
         }
 
         func dateSelection(_ selection: UICalendarSelectionSingleDate, didSelectDate dateComponents: DateComponents?) {
@@ -1654,7 +1663,6 @@ struct ReportsView: View {
     @State private var reportToDelete: GeneratedReport?
     @State private var startDate = HealthKitManager.mondayThroughSunday().start
     @State private var endDate = HealthKitManager.mondayThroughSunday().end.addingTimeInterval(-1)
-    @State private var detectedInBodyValues: InBodyDetectedValues?
 
     var body: some View {
         NavigationStack {
@@ -1679,7 +1687,7 @@ struct ReportsView: View {
                         JourneyFitCard {
                             VStack(alignment: .leading, spacing: 12) {
                                 Label("INBODY REPORT", systemImage: "doc.viewfinder").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
-                                Text("Import an InBody image to append it unchanged to this report. JourneyFit also reads its measurements for your Progress trend.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                                Text("Add an InBody image when you want to append it unchanged to this PDF. Import reports for InBody Progress from the Progress tab.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
                                 PhotosPicker(selection: $selectedPhoto, matching: .images) { Label("Add InBody report", systemImage: "photo.badge.plus") }.buttonStyle(.bordered).tint(JourneyFitTheme.accent)
                                 if let attachedName = selectedInBodyName {
                                     HStack { Image(systemName: "checkmark.circle.fill").foregroundStyle(JourneyFitTheme.success); Text("Attached: \(attachedName)").font(.subheadline); Spacer(); Button { selectedInBodyIDs.removeAll(); selectedInBodyName = nil } label: { Image(systemName: "xmark.circle") }.buttonStyle(.borderless).accessibilityLabel("Remove InBody attachment") }
@@ -1716,7 +1724,6 @@ struct ReportsView: View {
                 .presentationDetents([.large])
             }
             .sheet(isPresented: $showingPreview) { if let exportURL { PDFPreviewScreen(url: exportURL) } }
-            .sheet(item: $detectedInBodyValues) { values in InBodyMeasurementEditor(detectedValues: values).presentationDetents([.large]) }
             .alert("Delete saved report?", isPresented: Binding(get: { reportToDelete != nil }, set: { if !$0 { reportToDelete = nil } }), presenting: reportToDelete) { report in
                 Button("Delete", role: .destructive) { deleteSavedReport(report) }
                 Button("Cancel", role: .cancel) { reportToDelete = nil }
@@ -1739,12 +1746,7 @@ struct ReportsView: View {
             selectedInBodyIDs = [report.id]
             selectedInBodyName = report.displayName
             try context.save()
-            if let detected = await InBodyReportReader.read(data), detected.weightKg != nil || detected.bodyFatPercent != nil || detected.visceralFatLevel != nil || detected.bmi != nil {
-                detectedInBodyValues = detected
-                showToast(detected.isComplete ? "InBody result read. Confirm the values." : "Some InBody values need review.")
-            } else {
-                showToast("InBody image added unchanged. Measurements could not be read.")
-            }
+            showToast("InBody image added unchanged.")
         } catch { showToast("Could not save the InBody image.") }
         selectedPhoto = nil
     }
