@@ -636,6 +636,8 @@ struct InBodyProgressDashboard: View {
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var detectedValues: InBodyDetectedValues?
     @State private var importMessage: String?
+    @State private var importedImage: UIImage?
+    @State private var showingResultsManager = false
 
     private var points: [Point] {
         measurements.sorted { $0.measuredAt < $1.measuredAt }.map {
@@ -653,6 +655,8 @@ struct InBodyProgressDashboard: View {
                 PhotosPicker(selection: $selectedPhoto, matching: .images) {
                     Label("Import report", systemImage: "photo.badge.plus").font(.caption.weight(.semibold))
                 }
+                Button("Manage") { showingResultsManager = true }
+                    .font(.caption.weight(.semibold))
             }
             JourneyFitCard {
                 if points.isEmpty {
@@ -696,22 +700,20 @@ struct InBodyProgressDashboard: View {
             }
         }
         .onChange(of: selectedPhoto) { _, item in Task { await importReport(item) } }
-        .sheet(item: $detectedValues) { values in InBodyMeasurementEditor(detectedValues: values).presentationDetents([.large]) }
+        .sheet(item: $detectedValues) { values in InBodyMeasurementEditor(detectedValues: values, sourceImage: importedImage).presentationDetents([.large]) }
+        .sheet(isPresented: $showingResultsManager) { InBodyResultsManager().presentationDetents([.large]) }
         .alert("InBody import", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) { Button("OK", role: .cancel) {} } message: { Text(importMessage ?? "") }
     }
 
     private func importReport(_ item: PhotosPickerItem?) async {
         guard let item, let data = try? await item.loadTransferable(type: Data.self) else { return }
         defer { selectedPhoto = nil }
+        importedImage = UIImage(data: data)
         if let url = try? InBodyStorage.save(data: data) {
             context.insert(InBodyReport(localFilename: url.lastPathComponent, displayName: "InBody report · \(Date.now.formatted(date: .abbreviated, time: .omitted))"))
             try? context.save()
         }
-        guard let values = await InBodyReportReader.read(data), values.weightKg != nil || values.bodyFatPercent != nil || values.visceralFatLevel != nil || values.bmi != nil else {
-            importMessage = "JourneyFit could not read measurements from this image. Try a clear, uncropped InBody report."
-            return
-        }
-        detectedValues = values
+        detectedValues = await InBodyReportReader.read(data) ?? InBodyDetectedValues(weightKg: nil, bodyFatPercent: nil, visceralFatLevel: nil, bmi: nil)
     }
 
     private func value(for measurement: InBodyMeasurement) -> Double {
@@ -754,38 +756,154 @@ struct InBodyDetectedValues: Identifiable {
 struct InBodyMeasurementEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
-    @State private var date = Calendar.current.startOfDay(for: .now)
-    @State private var weightKg: Double
-    @State private var bodyFatPercent: Double
-    @State private var visceralFatLevel: Double
-    @State private var bmi: Double
+    @State private var date: Date
+    @State private var weightText: String
+    @State private var bodyFatText: String
+    @State private var visceralFatText: String
+    @State private var bmiText: String
+    @State private var showingSource = false
     let detectedValues: InBodyDetectedValues
+    let sourceImage: UIImage?
+    let existingMeasurement: InBodyMeasurement?
 
-    init(detectedValues: InBodyDetectedValues) {
+    private var isEditing: Bool { existingMeasurement != nil }
+    private var canSave: Bool {
+        [weightText, bodyFatText, visceralFatText, bmiText].allSatisfy { Double($0.replacingOccurrences(of: ",", with: ".")) != nil }
+    }
+
+    init(detectedValues: InBodyDetectedValues, sourceImage: UIImage? = nil) {
         self.detectedValues = detectedValues
-        _weightKg = State(initialValue: detectedValues.weightKg ?? 0)
-        _bodyFatPercent = State(initialValue: detectedValues.bodyFatPercent ?? 0)
-        _visceralFatLevel = State(initialValue: detectedValues.visceralFatLevel ?? 0)
-        _bmi = State(initialValue: detectedValues.bmi ?? 0)
+        self.sourceImage = sourceImage
+        self.existingMeasurement = nil
+        _date = State(initialValue: Calendar.current.startOfDay(for: .now))
+        _weightText = State(initialValue: Self.text(detectedValues.weightKg))
+        _bodyFatText = State(initialValue: Self.text(detectedValues.bodyFatPercent))
+        _visceralFatText = State(initialValue: Self.text(detectedValues.visceralFatLevel))
+        _bmiText = State(initialValue: Self.text(detectedValues.bmi))
+    }
+
+    init(existingMeasurement: InBodyMeasurement) {
+        self.detectedValues = InBodyDetectedValues(weightKg: existingMeasurement.weightKg, bodyFatPercent: existingMeasurement.bodyFatPercent, visceralFatLevel: existingMeasurement.visceralFatLevel, bmi: existingMeasurement.bmi)
+        self.sourceImage = nil
+        self.existingMeasurement = existingMeasurement
+        _date = State(initialValue: existingMeasurement.measuredAt)
+        _weightText = State(initialValue: Self.text(existingMeasurement.weightKg))
+        _bodyFatText = State(initialValue: Self.text(existingMeasurement.bodyFatPercent))
+        _visceralFatText = State(initialValue: Self.text(existingMeasurement.visceralFatLevel))
+        _bmiText = State(initialValue: Self.text(existingMeasurement.bmi))
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section(detectedValues.isComplete ? "READ FROM YOUR INBODY REPORT" : "CHECK THE DETECTED INBODY VALUES") {
-                    DatePicker("Measurement date", selection: $date, in: ...Date.now, displayedComponents: .date)
-                    TextField("Weight (kg)", value: $weightKg, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
-                    TextField("Body fat (%)", value: $bodyFatPercent, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
-                    TextField("Visceral fat level", value: $visceralFatLevel, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
-                    TextField("BMI", value: $bmi, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad)
+                if sourceImage != nil {
+                    Section("IMPORTED INBODY REPORT") {
+                        Button { showingSource = true } label: {
+                            Label("View report while checking values", systemImage: "doc.viewfinder")
+                        }
+                    }
                 }
-                Section { Text(detectedValues.isComplete ? "JourneyFit read these values from the imported report. Confirm them before saving the trend." : "Some values could not be confidently read. Correct the highlighted values from the imported report before saving.").font(.footnote).foregroundStyle(.secondary) }
+                Section(isEditing ? "INBODY RESULT" : "CHECK EACH VALUE AGAINST THE REPORT") {
+                    DatePicker("Measurement date", selection: $date, in: ...Date.now, displayedComponents: .date)
+                    valueField("Weight", unit: "kg", text: $weightText, prompt: "e.g. 74.6")
+                    valueField("Body fat", unit: "%", text: $bodyFatText, prompt: "e.g. 18.4")
+                    valueField("Visceral fat level", unit: "level", text: $visceralFatText, prompt: "e.g. 7")
+                    valueField("BMI", unit: "", text: $bmiText, prompt: "e.g. 23.1")
+                }
+                if !isEditing {
+                    Section { Text("These are OCR suggestions only. The labels above identify exactly what each field means; use View report to verify and correct every value before saving.").font(.footnote).foregroundStyle(.secondary) }
+                }
             }
-            .navigationTitle("Log InBody result")
+            .navigationTitle(isEditing ? "Edit InBody result" : "Review InBody result")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { context.insert(InBodyMeasurement(measuredAt: date, weightKg: weightKg, bodyFatPercent: bodyFatPercent, visceralFatLevel: visceralFatLevel, bmi: bmi)); try? context.save(); dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button(isEditing ? "Save" : "Add to progress") { save() }.disabled(!canSave) }
             }
+            .sheet(isPresented: $showingSource) { if let sourceImage { InBodyImagePreview(image: sourceImage) } }
+        }
+    }
+
+    @ViewBuilder
+    private func valueField(_ label: String, unit: String, text: Binding<String>, prompt: String) -> some View {
+        LabeledContent {
+            HStack(spacing: 6) {
+                TextField(prompt, text: text).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
+                if !unit.isEmpty { Text(unit).foregroundStyle(.secondary).frame(minWidth: 30, alignment: .leading) }
+            }
+        } label: { Text(label) }
+    }
+
+    private func save() {
+        guard let weight = Double(weightText.replacingOccurrences(of: ",", with: ".")),
+              let bodyFat = Double(bodyFatText.replacingOccurrences(of: ",", with: ".")),
+              let visceralFat = Double(visceralFatText.replacingOccurrences(of: ",", with: ".")),
+              let bmi = Double(bmiText.replacingOccurrences(of: ",", with: ".")) else { return }
+        if let existingMeasurement {
+            existingMeasurement.measuredAt = date
+            existingMeasurement.weightKg = weight
+            existingMeasurement.bodyFatPercent = bodyFat
+            existingMeasurement.visceralFatLevel = visceralFat
+            existingMeasurement.bmi = bmi
+        } else {
+            context.insert(InBodyMeasurement(measuredAt: date, weightKg: weight, bodyFatPercent: bodyFat, visceralFatLevel: visceralFat, bmi: bmi))
+        }
+        try? context.save()
+        dismiss()
+    }
+
+    private static func text(_ value: Double?) -> String {
+        value.map { $0.formatted(.number.precision(.fractionLength(0...1))) } ?? ""
+    }
+}
+
+struct InBodyResultsManager: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
+    @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var measurements: [InBodyMeasurement]
+    @State private var editingMeasurement: InBodyMeasurement?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if measurements.isEmpty {
+                    ContentUnavailableView("No InBody results", systemImage: "chart.line.uptrend.xyaxis", description: Text("Import an InBody report from Progress to add a result."))
+                } else {
+                    ForEach(measurements) { measurement in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(measurement.measuredAt.formatted(date: .abbreviated, time: .omitted)).font(.headline)
+                            Text("\(measurement.weightKg.formatted()) kg · \(measurement.bodyFatPercent.formatted())% body fat · Visceral \(measurement.visceralFatLevel.formatted()) · BMI \(measurement.bmi.formatted())")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) { delete(measurement) } label: { Label("Delete", systemImage: "trash") }
+                            Button { editingMeasurement = measurement } label: { Label("Edit", systemImage: "pencil") }.tint(JourneyFitTheme.accent)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Manage InBody results")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(item: $editingMeasurement) { measurement in InBodyMeasurementEditor(existingMeasurement: measurement).presentationDetents([.large]) }
+        }
+    }
+
+    private func delete(_ measurement: InBodyMeasurement) {
+        context.delete(measurement)
+        try? context.save()
+    }
+}
+
+struct InBodyImagePreview: View {
+    @Environment(\.dismiss) private var dismiss
+    let image: UIImage
+
+    var body: some View {
+        NavigationStack {
+            ScrollView([.horizontal, .vertical]) {
+                Image(uiImage: image).resizable().scaledToFit().padding()
+            }
+            .navigationTitle("Imported InBody report")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }
@@ -1820,25 +1938,49 @@ enum InBodyReportReader {
     }
 
     private static func parse(_ lines: [String]) -> InBodyDetectedValues {
-        let text = lines.joined(separator: " ")
         return InBodyDetectedValues(
-            weightKg: firstNumber(in: text, labels: ["Weight"]),
-            bodyFatPercent: firstNumber(in: text, labels: ["Percent Body Fat", "Body Fat %", "PBF"]),
-            visceralFatLevel: firstNumber(in: text, labels: ["Visceral Fat Level", "Visceral Fat", "VFL"]),
-            bmi: firstNumber(in: text, labels: ["BMI"])
+            weightKg: normalizedWeight(number(in: lines, labels: ["Weight"], excluding: ["target", "control", "change"])),
+            bodyFatPercent: validated(number(in: lines, labels: ["Percent Body Fat", "Body Fat %", "PBF"]), range: 2...70),
+            visceralFatLevel: validated(number(in: lines, labels: ["Visceral Fat Level", "VFL"]), range: 1...30),
+            bmi: normalizedBMI(number(in: lines, labels: ["BMI"]))
         )
     }
 
-    private static func firstNumber(in text: String, labels: [String]) -> Double? {
+    /// Only accept a number from the same OCR line as a recognised metric label.
+    /// This avoids silently borrowing values from a different section of a dense
+    /// InBody sheet (such as Target Weight or Weight Control).
+    private static func number(in lines: [String], labels: [String], excluding: [String] = []) -> Double? {
         for label in labels {
             let escaped = NSRegularExpression.escapedPattern(for: label).replacingOccurrences(of: "\\ ", with: "\\s+")
-            let pattern = "(?i)\\b\(escaped)\\b[^0-9]{0,18}([0-9]{1,3}(?:\\.[0-9]{1,2})?)"
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-                  let range = Range(match.range(at: 1), in: text) else { continue }
-            return Double(text[range])
+            let pattern = "(?i)\\b\(escaped)\\b[^0-9]{0,14}([0-9]{1,4}(?:\\.[0-9]{1,2})?)"
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for line in lines {
+                let lower = line.lowercased()
+                guard !excluding.contains(where: { lower.contains($0) }),
+                      let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                      let range = Range(match.range(at: 1), in: line),
+                      let value = Double(line[range]) else { continue }
+                return value
+            }
         }
         return nil
+    }
+
+    private static func normalizedWeight(_ value: Double?) -> Double? {
+        guard let value else { return nil }
+        let adjusted = value > 250 && value <= 2_500 ? value / 10 : value
+        return validated(adjusted, range: 20...300)
+    }
+
+    private static func normalizedBMI(_ value: Double?) -> Double? {
+        guard let value else { return nil }
+        let adjusted = value > 80 && value <= 800 ? value / 10 : value
+        return validated(adjusted, range: 10...60)
+    }
+
+    private static func validated(_ value: Double?, range: ClosedRange<Double>) -> Double? {
+        guard let value, range.contains(value) else { return nil }
+        return value
     }
 }
 
