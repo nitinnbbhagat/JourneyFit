@@ -264,7 +264,44 @@ enum AppleAppNavigator {
 
 struct RootView: View {
     var body: some View {
-        AppTabView()
+        ZStack {
+            AppTabView()
+            WeeklyBackupService()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+/// Creates a durable, device-local copy when the app is opened or returns to the
+/// foreground after a week. iOS does not guarantee an exact background schedule
+/// for a local-only app, so the next active launch is the reliable checkpoint.
+private struct WeeklyBackupService: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
+    @Query(sort: \InBodyReport.createdAt, order: .reverse) private var inBodyReports: [InBodyReport]
+    @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var inBodyMeasurements: [InBodyMeasurement]
+    @Query(sort: \GeneratedReport.createdAt, order: .reverse) private var generatedReports: [GeneratedReport]
+    @AppStorage("journeyFit.lastAutomaticBackup") private var lastAutomaticBackup = 0.0
+
+    var body: some View {
+        Color.clear
+            .task { createBackupIfDue() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { createBackupIfDue() }
+            }
+    }
+
+    private func createBackupIfDue() {
+        let lastBackup = Date(timeIntervalSince1970: lastAutomaticBackup)
+        guard lastAutomaticBackup == 0 || Date.now.timeIntervalSince(lastBackup) >= 7 * 24 * 60 * 60 else { return }
+        do {
+            let output = try BackupStorage.weeklyBackupURL()
+            _ = try JourneyFitBackup.export(workouts: workouts, inBodyReports: inBodyReports, inBodyMeasurements: inBodyMeasurements, generatedReports: generatedReports, outputURL: output)
+            lastAutomaticBackup = Date.now.timeIntervalSince1970
+        } catch {
+            // A manual backup remains available in Profile if local storage is unavailable.
+        }
     }
 }
 
@@ -1717,7 +1754,9 @@ struct WorkoutCalendar: UIViewRepresentable {
         func calendarView(_ calendarView: UICalendarView, decorationFor dateComponents: DateComponents) -> UICalendarView.Decoration? {
             guard let date = WeekCalendar.mondayFirst.date(from: dateComponents),
                   parent.loggedDates.contains(where: { Calendar.current.isDate($0, inSameDayAs: date) }) else { return nil }
-            return .default(color: .systemBlue, size: .large)
+            // The small, system-provided dot sits directly under its own date.
+            // A large dot can visually fall into the next week's row.
+            return .default(color: .systemBlue, size: .small)
         }
 
         func dateSelection(_ selection: UICalendarSelectionSingleDate, didSelectDate dateComponents: DateComponents?) {
@@ -2041,8 +2080,25 @@ struct BackupAttachment: Codable {
     let data: Data
 }
 
+enum BackupStorage {
+    private static let filename = "JourneyFit-weekly-backup.json"
+
+    static func weeklyBackupURL() throws -> URL {
+        let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appending(path: "JourneyFit Backups", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appending(path: filename)
+    }
+
+    static func existingWeeklyBackupURL() -> URL? {
+        guard let folder = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false) else { return nil }
+        let url = folder.appending(path: "JourneyFit Backups", directoryHint: .isDirectory).appending(path: filename)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+}
+
 enum JourneyFitBackup {
-    static func export(workouts: [StrengthWorkout], inBodyReports: [InBodyReport], inBodyMeasurements: [InBodyMeasurement], generatedReports: [GeneratedReport]) throws -> URL {
+    static func export(workouts: [StrengthWorkout], inBodyReports: [InBodyReport], inBodyMeasurements: [InBodyMeasurement], generatedReports: [GeneratedReport], outputURL: URL? = nil) throws -> URL {
         let backup = JourneyFitBackupFile(
             version: 2,
             exportedAt: .now,
@@ -2052,7 +2108,7 @@ enum JourneyFitBackup {
             generatedReports: generatedReports.compactMap { report in guard let data = try? Data(contentsOf: ReportStorage.url(named: report.localFilename)) else { return nil }; return BackupAttachment(id: report.id, createdAt: report.createdAt, displayName: report.displayName, data: data) }
         )
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        let output = FileManager.default.temporaryDirectory.appending(path: "JourneyFit-backup-\(Int(Date.now.timeIntervalSince1970)).json")
+        let output = outputURL ?? FileManager.default.temporaryDirectory.appending(path: "JourneyFit-backup-\(Int(Date.now.timeIntervalSince1970)).json")
         try encoder.encode(backup).write(to: output, options: .atomic)
         return output
     }
@@ -2232,8 +2288,10 @@ struct SettingsView: View {
     @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var inBodyMeasurements: [InBodyMeasurement]
     @Query(sort: \GeneratedReport.createdAt, order: .reverse) private var generatedReports: [GeneratedReport]
     @State private var backupURL: URL?
+    @State private var automaticBackupURL: URL?
     @State private var showingImporter = false
     @State private var backupMessage: String?
+    @AppStorage("journeyFit.lastAutomaticBackup") private var lastAutomaticBackup = 0.0
 
     var body: some View {
         NavigationStack {
@@ -2249,6 +2307,13 @@ struct SettingsView: View {
                                 Text("Back up all workouts, set logs, InBody measurements and images, and saved PDF reports as one portable JourneyFit backup file.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
                                 Button { createBackup() } label: { Label("Create complete backup", systemImage: "arrow.down.doc") }.buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
                                 if let backupURL { ShareLink(item: backupURL) { Label("Save or share backup", systemImage: "square.and.arrow.up") }.buttonStyle(.bordered) }
+                                Divider()
+                                Label("Automatic weekly backup", systemImage: "clock.arrow.circlepath").font(.subheadline.weight(.semibold))
+                                Text("JourneyFit keeps a device-local backup when you next open or return to the app after seven days. Create a manual backup and save it to Files or iCloud Drive for protection if the app is deleted.").font(.footnote).foregroundStyle(JourneyFitTheme.muted)
+                                if let automaticBackupURL {
+                                    ShareLink(item: automaticBackupURL) { Label("Save latest weekly backup", systemImage: "square.and.arrow.up") }.buttonStyle(.bordered)
+                                    if lastAutomaticBackup > 0 { Text("Last automatic backup: \(Date(timeIntervalSince1970: lastAutomaticBackup).formatted(date: .abbreviated, time: .shortened))").font(.footnote).foregroundStyle(JourneyFitTheme.muted) }
+                                }
                                 Button { showingImporter = true } label: { Label("Restore from backup", systemImage: "arrow.up.doc") }.buttonStyle(.bordered)
                                 if let backupMessage { Text(backupMessage).font(.footnote).foregroundStyle(JourneyFitTheme.muted) }
                             }
@@ -2263,6 +2328,8 @@ struct SettingsView: View {
             guard case let .success(url) = result else { return }
             restoreBackup(from: url)
         }
+        .onAppear { refreshAutomaticBackup() }
+        .onChange(of: lastAutomaticBackup) { _, _ in refreshAutomaticBackup() }
     }
 
     private func createBackup() {
@@ -2272,6 +2339,10 @@ struct SettingsView: View {
         } catch {
             backupMessage = "Could not create the backup."
         }
+    }
+
+    private func refreshAutomaticBackup() {
+        automaticBackupURL = BackupStorage.existingWeeklyBackupURL()
     }
 
     private func restoreBackup(from url: URL) {
