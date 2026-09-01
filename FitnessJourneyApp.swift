@@ -496,11 +496,12 @@ struct DashboardView: View {
 }
 
 private enum TrendChartStyle {
-    static func domain(for values: [Double]) -> ClosedRange<Double> {
+    static func domain(for values: [Double], minimumSpan: Double) -> ClosedRange<Double> {
         guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
-        let span = maximum - minimum
-        let padding = max(span * 0.2, max(abs(maximum) * 0.03, 0.5))
-        return (minimum - padding)...(maximum + padding)
+        let span = max(maximum - minimum, minimumSpan)
+        let midpoint = (minimum + maximum) / 2
+        let padding = span * 0.12
+        return (midpoint - span / 2 - padding)...(midpoint + span / 2 + padding)
     }
 
     static func dates(for dates: [Date]) -> [Date] {
@@ -525,7 +526,7 @@ struct LiftingProgressDashboard: View {
     }
 
     private struct ProgressPoint: Identifiable {
-        let id: UUID
+        let id: Date
         let date: Date
         let weight: Double
         let totalReps: Int
@@ -540,13 +541,18 @@ struct LiftingProgressDashboard: View {
     private var activeExercise: String? { selectedExercise.flatMap { exercises.contains($0) ? $0 : nil } ?? exercises.first }
     private var points: [ProgressPoint] {
         guard let activeExercise else { return [] }
-        return workouts
-            .filter { $0.sets.contains(where: { $0.exercise == activeExercise }) }
-            .sorted { $0.loggedAt < $1.loggedAt }
-            .map { workout in
-                let sets = workout.sets.filter { $0.exercise == activeExercise }
-                return ProgressPoint(id: workout.id, date: workout.startedAt, weight: sets.map(\.weightKg).max() ?? 0, totalReps: sets.reduce(0) { $0 + $1.reps })
-            }
+        let calendar = Calendar.current
+        let workoutsByDay = Dictionary(grouping: workouts.filter { $0.sets.contains(where: { $0.exercise == activeExercise }) }) {
+            calendar.startOfDay(for: $0.startedAt)
+        }
+        return workoutsByDay.compactMap { day, workouts in
+            let sets = workouts.flatMap(\.sets).filter { $0.exercise == activeExercise }
+            guard !sets.isEmpty else { return nil }
+            // One point per date prevents duplicate x-values and represents the
+            // complete exercise volume for that workout day.
+            return ProgressPoint(id: day, date: day, weight: sets.map(\.weightKg).max() ?? 0, totalReps: sets.reduce(0) { $0 + $1.reps })
+        }
+        .sorted { $0.date < $1.date }
     }
 
     private var displayedPoints: [ProgressPoint] {
@@ -625,7 +631,7 @@ struct LiftingProgressDashboard: View {
                                     .foregroundStyle(JourneyFitTheme.ink).symbolSize(70)
                             }
                         }
-                        .chartYScale(domain: TrendChartStyle.domain(for: chartValues))
+                        .chartYScale(domain: TrendChartStyle.domain(for: chartValues, minimumSpan: metric == .totalReps ? 10 : 5))
                         .chartXAxis { AxisMarks(values: TrendChartStyle.dates(for: displayedPoints.map(\.date))) { AxisTick(); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
                         .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(JourneyFitTheme.muted.opacity(0.25)); AxisValueLabel() } }
                         .chartXSelection(value: $selectedChartDate)
@@ -657,7 +663,7 @@ private enum ProgressRange: String, CaseIterable, Identifiable {
 struct ProgressView: View {
     @Query(sort: \StrengthWorkout.startedAt, order: .reverse) private var workouts: [StrengthWorkout]
     @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var inBodyMeasurements: [InBodyMeasurement]
-    @State private var range: ProgressRange = .twelveWeeks
+    @State private var range: ProgressRange = .allTime
 
     private var rangeWorkouts: [StrengthWorkout] {
         guard let days = range.dayCount,
@@ -729,14 +735,27 @@ struct InBodyProgressDashboard: View {
     @State private var showingResultsManager = false
 
     private var points: [Point] {
-        measurements.sorted { $0.measuredAt < $1.measuredAt }.map {
-            Point(id: $0.id, date: $0.measuredAt, value: value(for: $0))
-        }
+        let calendar = Calendar.current
+        let latestByDay = Dictionary(grouping: measurements) { calendar.startOfDay(for: $0.measuredAt) }
+            .compactMap { day, values -> Point? in
+                guard let latest = values.max(by: { $0.measuredAt < $1.measuredAt }) else { return nil }
+                return Point(id: latest.id, date: day, value: value(for: latest))
+            }
+        return latestByDay.sorted { $0.date < $1.date }
     }
 
     private var latest: InBodyMeasurement? { measurements.max { $0.measuredAt < $1.measuredAt } }
 
-    private var chartDomain: ClosedRange<Double> { TrendChartStyle.domain(for: points.map(\.value)) }
+    private var chartDomain: ClosedRange<Double> {
+        let minimumSpan: Double
+        switch metric {
+        case .weight: minimumSpan = 8
+        case .bodyFat: minimumSpan = 5
+        case .visceralFat: minimumSpan = 4
+        case .bmi: minimumSpan = 3
+        }
+        return TrendChartStyle.domain(for: points.map(\.value), minimumSpan: minimumSpan)
+    }
 
     private var inspectedPoint: Point? {
         guard let selectedChartDate else { return nil }
