@@ -5,6 +5,7 @@ import PhotosUI
 import PDFKit
 import UIKit
 @preconcurrency import Vision
+import ImageIO
 import UniformTypeIdentifiers
 import Charts
 
@@ -1015,14 +1016,58 @@ struct InBodyResultsManager: View {
 struct InBodyImagePreview: View {
     @Environment(\.dismiss) private var dismiss
     let image: UIImage
+    @State private var scale = 1.0
+    @State private var savedScale = 1.0
+    @State private var offset = CGSize.zero
+    @State private var savedOffset = CGSize.zero
 
     var body: some View {
         NavigationStack {
-            ScrollView([.horizontal, .vertical]) {
-                Image(uiImage: image).resizable().scaledToFit().padding()
+            GeometryReader { geometry in
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(magnificationGesture)
+                    .simultaneousGesture(dragGesture)
+                    .onTapGesture(count: 2) { resetZoom() }
             }
+            .background(.black)
             .navigationTitle("Imported InBody report")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Text("Pinch to zoom · Double tap to fit").font(.caption).foregroundStyle(.secondary) }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+
+    private var magnificationGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in scale = min(max(savedScale * value, 1), 5) }
+            .onEnded { _ in
+                savedScale = scale
+                if scale == 1 { offset = .zero; savedOffset = .zero }
+            }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard scale > 1 else { return }
+                offset = CGSize(width: savedOffset.width + value.translation.width, height: savedOffset.height + value.translation.height)
+            }
+            .onEnded { _ in savedOffset = offset }
+    }
+
+    private func resetZoom() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            scale = 1
+            savedScale = 1
+            offset = .zero
+            savedOffset = .zero
         }
     }
 }
@@ -2043,28 +2088,78 @@ enum InBodyStorage {
 }
 
 enum InBodyReportReader {
+    private struct Token {
+        let text: String
+        let box: CGRect
+    }
+
     static func read(_ data: Data) async -> InBodyDetectedValues? {
         guard let image = UIImage(data: data), let cgImage = image.cgImage else { return nil }
         return await withCheckedContinuation { continuation in
             let request = VNRecognizeTextRequest { request, _ in
-                let lines = (request.results as? [VNRecognizedTextObservation])?.compactMap { $0.topCandidates(1).first?.string } ?? []
-                continuation.resume(returning: parse(lines))
+                let tokens = (request.results as? [VNRecognizedTextObservation])?.compactMap { observation -> Token? in
+                    guard let text = observation.topCandidates(1).first?.string else { return nil }
+                    return Token(text: text, box: observation.boundingBox)
+                } ?? []
+                continuation.resume(returning: parse(tokens))
             }
             request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["en-US"]
+            request.customWords = ["InBody", "PBF", "BMI", "SMM", "Visceral"]
+            request.usesLanguageCorrection = false
             DispatchQueue.global(qos: .userInitiated).async {
-                try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+                try? VNImageRequestHandler(cgImage: cgImage, orientation: visionOrientation(for: image.imageOrientation), options: [:]).perform([request])
             }
         }
     }
 
-    private static func parse(_ lines: [String]) -> InBodyDetectedValues {
+    private static func parse(_ tokens: [Token]) -> InBodyDetectedValues {
+        let lines = tokens.map(\.text)
         return InBodyDetectedValues(
-            weightKg: normalizedWeight(number(in: lines, labels: ["Weight"], excluding: ["target", "control", "change"])),
-            bodyFatPercent: validated(number(in: lines, labels: ["Percent Body Fat", "Body Fat %", "PBF"]), range: 2...70),
-            visceralFatLevel: validated(number(in: lines, labels: ["Visceral Fat Level", "VFL"]), range: 1...30),
-            bmi: normalizedBMI(number(in: lines, labels: ["BMI"]))
+            weightKg: normalizedWeight(value(near: ["Weight"], in: tokens, excluding: ["target", "control", "change", "history"], range: 20...2_500) ?? number(in: lines, labels: ["Weight"], excluding: ["target", "control", "change", "history"])),
+            bodyFatPercent: validated(value(near: ["PBF", "Percent Body Fat", "Body Fat %"], in: tokens, excluding: ["mass"], range: 2...70) ?? number(in: lines, labels: ["PBF", "Percent Body Fat", "Body Fat %"]), range: 2...70),
+            visceralFatLevel: validated(visceralFatValue(in: tokens) ?? number(in: lines, labels: ["Visceral Fat Level", "VFL"]), range: 1...30),
+            bmi: normalizedBMI(value(near: ["BMI"], in: tokens, range: 10...800) ?? number(in: lines, labels: ["BMI"]))
         )
+    }
+
+    /// InBody sheets often put a label and its number in separate OCR blocks.
+    /// Prefer a value on the same horizontal row, then a nearby block below it.
+    private static func value(near labels: [String], in tokens: [Token], excluding: [String] = [], range: ClosedRange<Double>) -> Double? {
+        let anchors = tokens.filter { token in
+            let text = token.text.lowercased()
+            return labels.contains(where: { text.localizedCaseInsensitiveContains($0) }) && !excluding.contains(where: { text.contains($0) })
+        }
+        var candidates: [(value: Double, score: CGFloat)] = []
+        for anchor in anchors {
+            if let direct = number(in: [anchor.text], labels: labels, excluding: excluding), range.contains(direct) {
+                candidates.append((direct, 0))
+            }
+            for token in tokens where token.text != anchor.text {
+                guard !excluding.contains(where: { token.text.lowercased().contains($0) }), let number = firstNumber(in: token.text), range.contains(number) else { continue }
+                let verticalDistance = abs(token.box.midY - anchor.box.midY)
+                let horizontalDistance = token.box.midX - anchor.box.maxX
+                if verticalDistance <= 0.035, horizontalDistance >= -0.03, horizontalDistance <= 0.62 {
+                    candidates.append((number, verticalDistance * 10 + max(horizontalDistance, 0)))
+                } else if verticalDistance <= 0.10, abs(token.box.midX - anchor.box.midX) <= 0.38 {
+                    candidates.append((number, 2 + verticalDistance * 10 + abs(token.box.midX - anchor.box.midX)))
+                }
+            }
+        }
+        return candidates.min(by: { $0.score < $1.score })?.value
+    }
+
+    private static func visceralFatValue(in tokens: [Token]) -> Double? {
+        guard let anchor = tokens.first(where: { $0.text.localizedCaseInsensitiveContains("Visceral Fat") }) else { return nil }
+        let candidates = tokens.compactMap { token -> (Double, CGFloat)? in
+            guard (token.text.localizedCaseInsensitiveContains("level") || token.box.midY < anchor.box.midY),
+                  let number = firstNumber(in: token.text), (1...30).contains(number) else { return nil }
+            let verticalDistance = abs(token.box.midY - anchor.box.midY)
+            let horizontalDistance = abs(token.box.midX - anchor.box.midX)
+            guard verticalDistance <= 0.11, horizontalDistance <= 0.45 else { return nil }
+            return (number, verticalDistance * 10 + horizontalDistance)
+        }
+        return candidates.min(by: { $0.1 < $1.1 })?.0
     }
 
     /// Only accept a number from the same OCR line as a recognised metric label.
@@ -2102,6 +2197,28 @@ enum InBodyReportReader {
     private static func validated(_ value: Double?, range: ClosedRange<Double>) -> Double? {
         guard let value, range.contains(value) else { return nil }
         return value
+    }
+
+    private static func firstNumber(in text: String) -> Double? {
+        let pattern = "(?<![0-9])([0-9]{1,4}(?:[.,][0-9]{1,2})?)(?![0-9])"
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return Double(text[range].replacingOccurrences(of: ",", with: "."))
+    }
+
+    private static func visionOrientation(for orientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch orientation {
+        case .up: .up
+        case .down: .down
+        case .left: .left
+        case .right: .right
+        case .upMirrored: .upMirrored
+        case .downMirrored: .downMirrored
+        case .leftMirrored: .leftMirrored
+        case .rightMirrored: .rightMirrored
+        @unknown default: .up
+        }
     }
 }
 
