@@ -494,12 +494,27 @@ struct DashboardView: View {
     }
 }
 
+private enum TrendChartStyle {
+    static func domain(for values: [Double]) -> ClosedRange<Double> {
+        guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
+        let span = maximum - minimum
+        let padding = max(span * 0.2, max(abs(maximum) * 0.03, 0.5))
+        return (minimum - padding)...(maximum + padding)
+    }
+
+    static func dates(for dates: [Date]) -> [Date] {
+        guard dates.count > 3 else { return dates }
+        return Array(Set([dates[0], dates[dates.count / 2], dates[dates.count - 1]])).sorted()
+    }
+}
+
 struct LiftingProgressDashboard: View {
     let workouts: [StrengthWorkout]
     var sessionLimit: Int? = 5
     @State private var selectedMuscleGroup: String?
     @State private var selectedExercise: String?
     @State private var metric: ProgressMetric = .totalReps
+    @State private var selectedChartDate: Date?
 
     private enum ProgressMetric: String, CaseIterable, Identifiable {
         case totalReps = "Total reps"
@@ -542,6 +557,23 @@ struct LiftingProgressDashboard: View {
         metric == .weight ? "\(point.weight.formatted()) kg" : "\(point.totalReps) reps"
     }
 
+    private var chartValues: [Double] {
+        displayedPoints.map { metric == .weight ? $0.weight : Double($0.totalReps) }
+    }
+
+    private var inspectedPoint: ProgressPoint? {
+        guard let selectedChartDate else { return nil }
+        return displayedPoints.min { abs($0.date.timeIntervalSince(selectedChartDate)) < abs($1.date.timeIntervalSince(selectedChartDate)) }
+    }
+
+    private var changeText: String {
+        guard displayedPoints.count > 1, let latest = displayedPoints.last else { return "First recorded session" }
+        let previous = displayedPoints[displayedPoints.count - 2]
+        let change = metric == .weight ? latest.weight - previous.weight : Double(latest.totalReps - previous.totalReps)
+        let amount = metric == .weight ? abs(change).formatted(.number.precision(.fractionLength(0...1))) + " kg" : "\(Int(abs(change))) reps"
+        return change == 0 ? "No change vs previous" : "\(change > 0 ? "+" : "-")\(amount) vs previous"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(sessionLimit == nil ? "LIFTING PROGRESS" : "RECENT LIFTING PROGRESS").font(.caption.weight(.bold)).tracking(1).foregroundStyle(JourneyFitTheme.muted)
@@ -569,23 +601,41 @@ struct LiftingProgressDashboard: View {
                 JourneyFitCard {
                     VStack(alignment: .leading, spacing: 14) {
                         Picker("Metric", selection: $metric) { ForEach(ProgressMetric.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-                        Text(sessionLimit == nil ? "\(displayedPoints.count) logged session\(displayedPoints.count == 1 ? "" : "s") in this period" : "Latest \(displayedPoints.count) logged session\(displayedPoints.count == 1 ? "" : "s")").font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("LATEST").font(.caption2.weight(.bold)).foregroundStyle(JourneyFitTheme.muted)
+                                Text(displayedPoints.last.map(valueText(for:)) ?? "-").font(.title3.weight(.bold))
+                            }
+                            Divider().frame(height: 34)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("CHANGE").font(.caption2.weight(.bold)).foregroundStyle(JourneyFitTheme.muted)
+                                Text(changeText).font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.ink)
+                            }
+                            Spacer()
+                        }
                         Chart(displayedPoints) { point in
                             LineMark(x: .value("Session", point.date), y: .value(metric.chartTitle, metric == .weight ? point.weight : Double(point.totalReps)))
                                 .foregroundStyle(JourneyFitTheme.accent).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                             PointMark(x: .value("Session", point.date), y: .value(metric.chartTitle, metric == .weight ? point.weight : Double(point.totalReps)))
-                                .foregroundStyle(JourneyFitTheme.accent).symbolSize(36)
-                                .annotation(position: .top, overflowResolution: .init(x: .fit, y: .disabled)) {
-                                    Text(valueText(for: point)).font(.caption2.weight(.bold)).foregroundStyle(JourneyFitTheme.ink)
-                                }
+                                .foregroundStyle(JourneyFitTheme.accent).symbolSize(30)
+                            if let inspectedPoint {
+                                RuleMark(x: .value("Selected session", inspectedPoint.date)).foregroundStyle(JourneyFitTheme.muted.opacity(0.5)).lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                                PointMark(x: .value("Selected session", inspectedPoint.date), y: .value(metric.chartTitle, metric == .weight ? inspectedPoint.weight : Double(inspectedPoint.totalReps)))
+                                    .foregroundStyle(JourneyFitTheme.ink).symbolSize(70)
+                            }
                         }
-                        .chartXAxis { AxisMarks(values: displayedPoints.map(\.date)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
-                        .chartYAxis { AxisMarks(position: .leading) }
-                        .frame(height: 190)
+                        .chartYScale(domain: TrendChartStyle.domain(for: chartValues))
+                        .chartXAxis { AxisMarks(values: TrendChartStyle.dates(for: displayedPoints.map(\.date))) { AxisTick(); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+                        .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(JourneyFitTheme.muted.opacity(0.25)); AxisValueLabel() } }
+                        .chartXSelection(value: $selectedChartDate)
+                        .frame(height: 155)
+                        Text(inspectedPoint.map { "\($0.date.formatted(date: .abbreviated, time: .omitted)) · \(valueText(for: $0))" } ?? "Tap a point to inspect that session.")
+                            .font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
                     }
                 }
             }
         }
+        .onChange(of: metric) { _, _ in selectedChartDate = nil }
     }
 }
 
@@ -670,6 +720,7 @@ struct InBodyProgressDashboard: View {
 
     let measurements: [InBodyMeasurement]
     @State private var metric: Metric = .weight
+    @State private var selectedChartDate: Date?
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var detectedValues: InBodyDetectedValues?
     @State private var importMessage: String?
@@ -683,6 +734,25 @@ struct InBodyProgressDashboard: View {
     }
 
     private var latest: InBodyMeasurement? { measurements.max { $0.measuredAt < $1.measuredAt } }
+
+    private var chartDomain: ClosedRange<Double> { TrendChartStyle.domain(for: points.map(\.value)) }
+
+    private var inspectedPoint: Point? {
+        guard let selectedChartDate else { return nil }
+        return points.min { abs($0.date.timeIntervalSince(selectedChartDate)) < abs($1.date.timeIntervalSince(selectedChartDate)) }
+    }
+
+    private func valueText(_ value: Double) -> String {
+        "\(value.formatted(.number.precision(.fractionLength(0...1))))\(metric.unit.isEmpty ? "" : " \(metric.unit)")"
+    }
+
+    private var changeText: String {
+        guard points.count > 1, let latest = points.last else { return "First recorded result" }
+        let previous = points[points.count - 2]
+        let change = latest.value - previous.value
+        let amount = valueText(abs(change))
+        return change == 0 ? "No change vs previous" : "\(change > 0 ? "+" : "-")\(amount) vs previous"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -708,11 +778,16 @@ struct InBodyProgressDashboard: View {
                             ForEach(Metric.allCases) { Text($0.rawValue).tag($0) }
                         }.pickerStyle(.menu)
                         if let latest {
-                            HStack {
+                            HStack(spacing: 16) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Latest").font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
-                                    Text("\(value(for: latest).formatted(.number.precision(.fractionLength(0...1)))) \(metric.unit)")
+                                    Text("LATEST").font(.caption2.weight(.bold)).foregroundStyle(JourneyFitTheme.muted)
+                                    Text(valueText(value(for: latest)))
                                         .font(.title3.weight(.bold))
+                                }
+                                Divider().frame(height: 34)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("CHANGE").font(.caption2.weight(.bold)).foregroundStyle(JourneyFitTheme.muted)
+                                    Text(changeText).font(.subheadline.weight(.semibold))
                                 }
                                 Spacer()
                                 Text(category(for: latest)).font(.caption.weight(.bold)).padding(.horizontal, 10).padding(.vertical, 6)
@@ -723,14 +798,20 @@ struct InBodyProgressDashboard: View {
                             LineMark(x: .value("Date", point.date), y: .value(metric.rawValue, point.value))
                                 .foregroundStyle(JourneyFitTheme.accent).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
                             PointMark(x: .value("Date", point.date), y: .value(metric.rawValue, point.value))
-                                .foregroundStyle(JourneyFitTheme.accent)
-                                .annotation(position: .top, overflowResolution: .init(x: .fit, y: .disabled)) {
-                                    Text("\(point.value.formatted(.number.precision(.fractionLength(0...1))))\(metric.unit)").font(.caption2.weight(.bold))
-                                }
+                                .foregroundStyle(JourneyFitTheme.accent).symbolSize(30)
+                            if let inspectedPoint {
+                                RuleMark(x: .value("Selected date", inspectedPoint.date)).foregroundStyle(JourneyFitTheme.muted.opacity(0.5)).lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                                PointMark(x: .value("Selected date", inspectedPoint.date), y: .value(metric.rawValue, inspectedPoint.value))
+                                    .foregroundStyle(JourneyFitTheme.ink).symbolSize(70)
+                            }
                         }
-                        .chartXAxis { AxisMarks(values: points.map(\.date)) { AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
-                        .chartYAxis { AxisMarks(position: .leading) }
-                        .frame(height: 190)
+                        .chartYScale(domain: chartDomain)
+                        .chartXAxis { AxisMarks(values: TrendChartStyle.dates(for: points.map(\.date))) { AxisTick(); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+                        .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(JourneyFitTheme.muted.opacity(0.25)); AxisValueLabel() } }
+                        .chartXSelection(value: $selectedChartDate)
+                        .frame(height: 155)
+                        Text(inspectedPoint.map { "\($0.date.formatted(date: .abbreviated, time: .omitted)) · \(valueText($0.value))" } ?? "Tap a point to inspect that result.")
+                            .font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
                         Text(categoryExplanation).font(.caption).foregroundStyle(JourneyFitTheme.muted)
                     }
                 }
@@ -740,6 +821,7 @@ struct InBodyProgressDashboard: View {
         .sheet(item: $detectedValues) { values in InBodyMeasurementEditor(detectedValues: values, sourceImage: importedImage).presentationDetents([.large]) }
         .sheet(isPresented: $showingResultsManager) { InBodyResultsManager().presentationDetents([.large]) }
         .alert("InBody import", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) { Button("OK", role: .cancel) {} } message: { Text(importMessage ?? "") }
+        .onChange(of: metric) { _, _ in selectedChartDate = nil }
     }
 
     private func importReport(_ item: PhotosPickerItem?) async {
