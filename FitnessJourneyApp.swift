@@ -122,20 +122,42 @@ final class GeneratedReport {
     }
 }
 
+struct ExerciseDefinition: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var name: String
+    var muscleGroup: String
+}
+
 enum ExerciseCatalog {
-    static let items: [(String, String)] = [
-        ("Chest Press", "Chest"), ("Dumbbell Incline Press", "Chest"), ("Pec Fly", "Chest"), ("Chest Raises", "Chest"),
-        ("Pulley Tricep Pushdown", "Triceps"), ("Single Back Dumbbell Extension", "Triceps"), ("Skull Crushers", "Triceps"), ("Dumbbell Overhead Triceps Extension", "Triceps"),
-        ("Bent Over Barbell Row", "Back"), ("RDL", "Back"), ("Lateral Pull Down", "Back"), ("1 Arm Rows", "Back"),
-        ("Wide-Grip Barbell Curl", "Biceps"), ("Close-Grip Barbell Curl", "Biceps"), ("Zottman Curl", "Biceps"), ("Waiter Curl", "Biceps"), ("Cross Hammer Curl", "Biceps"),
-        ("Reverse Barbell Press", "Forearms"), ("Pulley Forearm Pushdown", "Forearms"), ("Behind Back Barbell Wrist Twist", "Forearms"), ("Wrist Twists", "Forearms"),
-        ("Shoulder Press", "Shoulders"), ("Side Lateral Raise", "Shoulders"),
-        ("Leg Press", "Legs"), ("Calf Raises", "Legs"), ("Leg Curl", "Legs"), ("Dumbbell Squat", "Legs")
+    static let storageKey = "journeyFit.exerciseCatalog"
+    static let defaults: [ExerciseDefinition] = [
+        ExerciseDefinition(name: "Chest Press", muscleGroup: "Chest"), ExerciseDefinition(name: "Dumbbell Incline Press", muscleGroup: "Chest"), ExerciseDefinition(name: "Pec Fly", muscleGroup: "Chest"), ExerciseDefinition(name: "Chest Raises", muscleGroup: "Chest"),
+        ExerciseDefinition(name: "Pulley Tricep Pushdown", muscleGroup: "Triceps"), ExerciseDefinition(name: "Single Back Dumbbell Extension", muscleGroup: "Triceps"), ExerciseDefinition(name: "Skull Crushers", muscleGroup: "Triceps"), ExerciseDefinition(name: "Dumbbell Overhead Triceps Extension", muscleGroup: "Triceps"),
+        ExerciseDefinition(name: "Bent Over Barbell Row", muscleGroup: "Back"), ExerciseDefinition(name: "RDL", muscleGroup: "Back"), ExerciseDefinition(name: "Lateral Pull Down", muscleGroup: "Back"), ExerciseDefinition(name: "1 Arm Rows", muscleGroup: "Back"),
+        ExerciseDefinition(name: "Wide-Grip Barbell Curl", muscleGroup: "Biceps"), ExerciseDefinition(name: "Close-Grip Barbell Curl", muscleGroup: "Biceps"), ExerciseDefinition(name: "Zottman Curl", muscleGroup: "Biceps"), ExerciseDefinition(name: "Waiter Curl", muscleGroup: "Biceps"), ExerciseDefinition(name: "Cross Hammer Curl", muscleGroup: "Biceps"),
+        ExerciseDefinition(name: "Reverse Barbell Press", muscleGroup: "Forearms"), ExerciseDefinition(name: "Pulley Forearm Pushdown", muscleGroup: "Forearms"), ExerciseDefinition(name: "Behind Back Barbell Wrist Twist", muscleGroup: "Forearms"), ExerciseDefinition(name: "Wrist Twists", muscleGroup: "Forearms"),
+        ExerciseDefinition(name: "Shoulder Press", muscleGroup: "Shoulders"), ExerciseDefinition(name: "Side Lateral Raise", muscleGroup: "Shoulders"),
+        ExerciseDefinition(name: "Leg Press", muscleGroup: "Legs"), ExerciseDefinition(name: "Calf Raises", muscleGroup: "Legs"), ExerciseDefinition(name: "Leg Curl", muscleGroup: "Legs"), ExerciseDefinition(name: "Dumbbell Squat", muscleGroup: "Legs")
     ]
 
-    static let muscleGroups = Array(Set(items.map(\.1))).sorted()
-    static func exercises(for muscleGroup: String) -> [String] {
-        items.filter { $0.1 == muscleGroup }.map(\.0)
+    static func current() -> [ExerciseDefinition] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let catalog = try? JSONDecoder().decode([ExerciseDefinition].self, from: data),
+              !catalog.isEmpty else { return defaults }
+        return catalog
+    }
+
+    static func decode(_ data: Data) -> [ExerciseDefinition] {
+        guard let catalog = try? JSONDecoder().decode([ExerciseDefinition].self, from: data), !catalog.isEmpty else { return defaults }
+        return catalog
+    }
+
+    static func muscleGroups(in catalog: [ExerciseDefinition]) -> [String] {
+        Array(Set(catalog.map(\.muscleGroup))).sorted()
+    }
+
+    static func exercises(for muscleGroup: String, in catalog: [ExerciseDefinition]) -> [String] {
+        catalog.filter { $0.muscleGroup == muscleGroup }.map(\.name).sorted()
     }
 }
 
@@ -573,6 +595,15 @@ struct LiftingProgressDashboard: View {
         return displayedPoints.min { abs($0.date.timeIntervalSince(selectedChartDate)) < abs($1.date.timeIntervalSince(selectedChartDate)) }
     }
 
+    private func selectChartPoint(near date: Date) {
+        guard let nearest = displayedPoints.min(by: { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }) else { return }
+        if let selectedChartDate, Calendar.current.isDate(selectedChartDate, inSameDayAs: nearest.date) {
+            self.selectedChartDate = nil
+        } else {
+            selectedChartDate = nearest.date
+        }
+    }
+
     private var changeText: String {
         guard displayedPoints.count > 1, let latest = displayedPoints.last else { return "First recorded session" }
         let previous = displayedPoints[displayedPoints.count - 2]
@@ -634,7 +665,16 @@ struct LiftingProgressDashboard: View {
                         .chartYScale(domain: TrendChartStyle.domain(for: chartValues, minimumSpan: metric == .totalReps ? 10 : 5))
                         .chartXAxis { AxisMarks(values: TrendChartStyle.dates(for: displayedPoints.map(\.date))) { AxisTick(); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
                         .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(JourneyFitTheme.muted.opacity(0.25)); AxisValueLabel() } }
-                        .chartXSelection(value: $selectedChartDate)
+                        .chartOverlay { proxy in
+                            GeometryReader { geometry in
+                                Rectangle().fill(.clear).contentShape(Rectangle())
+                                    .gesture(SpatialTapGesture().onEnded { value in
+                                        let x = value.location.x - geometry[proxy.plotFrame!].origin.x
+                                        guard let date: Date = proxy.value(atX: x, as: Date.self) else { selectedChartDate = nil; return }
+                                        selectChartPoint(near: date)
+                                    })
+                            }
+                        }
                         .frame(height: 155)
                         Text(inspectedPoint.map { "\($0.date.formatted(date: .abbreviated, time: .omitted)) · \(valueText(for: $0))" } ?? "Tap a point to inspect that session.")
                             .font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
@@ -762,6 +802,15 @@ struct InBodyProgressDashboard: View {
         return points.min { abs($0.date.timeIntervalSince(selectedChartDate)) < abs($1.date.timeIntervalSince(selectedChartDate)) }
     }
 
+    private func selectChartPoint(near date: Date) {
+        guard let nearest = points.min(by: { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }) else { return }
+        if let selectedChartDate, Calendar.current.isDate(selectedChartDate, inSameDayAs: nearest.date) {
+            self.selectedChartDate = nil
+        } else {
+            selectedChartDate = nearest.date
+        }
+    }
+
     private func valueText(_ value: Double) -> String {
         "\(value.formatted(.number.precision(.fractionLength(0...1))))\(metric.unit.isEmpty ? "" : " \(metric.unit)")"
     }
@@ -828,7 +877,16 @@ struct InBodyProgressDashboard: View {
                         .chartYScale(domain: chartDomain)
                         .chartXAxis { AxisMarks(values: TrendChartStyle.dates(for: points.map(\.date))) { AxisTick(); AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
                         .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(JourneyFitTheme.muted.opacity(0.25)); AxisValueLabel() } }
-                        .chartXSelection(value: $selectedChartDate)
+                        .chartOverlay { proxy in
+                            GeometryReader { geometry in
+                                Rectangle().fill(.clear).contentShape(Rectangle())
+                                    .gesture(SpatialTapGesture().onEnded { value in
+                                        let x = value.location.x - geometry[proxy.plotFrame!].origin.x
+                                        guard let date: Date = proxy.value(atX: x, as: Date.self) else { selectedChartDate = nil; return }
+                                        selectChartPoint(near: date)
+                                    })
+                            }
+                        }
                         .frame(height: 155)
                         Text(inspectedPoint.map { "\($0.date.formatted(date: .abbreviated, time: .omitted)) · \(valueText($0.value))" } ?? "Tap a point to inspect that result.")
                             .font(.caption.weight(.semibold)).foregroundStyle(JourneyFitTheme.muted)
@@ -1319,8 +1377,6 @@ struct WorkoutLogView: View {
                             HStack(spacing: 10) {
                                 Button { showingTemplates = true } label: { Label("Use template", systemImage: "square.grid.2x2.fill").frame(maxWidth: .infinity) }
                                     .buttonStyle(.bordered).tint(JourneyFitTheme.accent)
-                                Button { loadLastWorkout() } label: { Label("Repeat last", systemImage: "arrow.clockwise").frame(maxWidth: .infinity) }
-                                    .buttonStyle(.bordered).tint(JourneyFitTheme.accent).disabled(savedWorkouts.isEmpty)
                             }
                             .font(.subheadline.weight(.semibold))
                         }
@@ -1546,16 +1602,6 @@ struct WorkoutLogView: View {
         expandedExerciseIDs = Set(exerciseGroups.map(\.id))
     }
 
-    private func loadLastWorkout() {
-        guard let last = savedWorkouts.sorted(by: { $0.loggedAt > $1.loggedAt }).first else { return }
-        workout = StrengthWorkout()
-        selectedDate = Calendar.current.startOfDay(for: .now)
-        for set in last.sets.sorted(by: { $0.loggedOrder < $1.loggedOrder }) {
-            workout.sets.append(LiftSet(loggedOrder: workout.sets.count, exercise: set.exercise, muscleGroup: set.muscleGroup, weightKg: set.weightKg, reps: set.reps))
-        }
-        expandedExerciseIDs = Set(exerciseGroups.map(\.id))
-    }
-
     private func savedSessionCard(_ day: SavedWorkoutDay) -> some View {
         Button { openSavedDay(day) } label: { JourneyFitCard { savedSessionRow(day) } }
             .buttonStyle(.plain)
@@ -1634,6 +1680,93 @@ struct SavedWorkoutDay: Identifiable {
     var setCount: Int { sets.count }
     var totalReps: Int { sets.reduce(0) { $0 + $1.reps } }
     var exerciseCount: Int { Set(sets.map(\.exercise)).count }
+}
+
+struct ExerciseCatalogManager: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(ExerciseCatalog.storageKey) private var catalogData = Data()
+    @State private var editor: ExerciseDefinition?
+
+    private var catalog: [ExerciseDefinition] { ExerciseCatalog.decode(catalogData) }
+    private var groupedCatalog: [(group: String, exercises: [ExerciseDefinition])] {
+        Dictionary(grouping: catalog, by: \.muscleGroup)
+            .map { ($0.key, $0.value.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) }
+            .sorted { $0.group.localizedCaseInsensitiveCompare($1.group) == .orderedAscending }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(groupedCatalog, id: \.group) { group in
+                    Section(group.group) {
+                        ForEach(group.exercises) { exercise in
+                            Button { editor = exercise } label: {
+                                HStack { Text(exercise.name); Spacer(); Image(systemName: "pencil").foregroundStyle(.secondary) }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .onDelete { offsets in delete(offsets, from: group.exercises) }
+                    }
+                }
+            }
+            .navigationTitle("Manage exercises")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) { Button { editor = ExerciseDefinition(name: "", muscleGroup: "") } label: { Image(systemName: "plus") } }
+            }
+            .sheet(item: $editor) { exercise in
+                ExerciseEditor(exercise: exercise) { updated in save(updated) }
+            }
+        }
+    }
+
+    private func save(_ updated: ExerciseDefinition) {
+        var next = catalog
+        if let index = next.firstIndex(where: { $0.id == updated.id }) { next[index] = updated }
+        else { next.append(updated) }
+        catalogData = (try? JSONEncoder().encode(next)) ?? catalogData
+    }
+
+    private func delete(_ offsets: IndexSet, from exercises: [ExerciseDefinition]) {
+        let deleted = Set(offsets.map { exercises[$0].id })
+        let next = catalog.filter { !deleted.contains($0.id) }
+        catalogData = (try? JSONEncoder().encode(next)) ?? catalogData
+    }
+}
+
+struct ExerciseEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: ExerciseDefinition
+    let save: (ExerciseDefinition) -> Void
+
+    init(exercise: ExerciseDefinition, save: @escaping (ExerciseDefinition) -> Void) {
+        _draft = State(initialValue: exercise)
+        self.save = save
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Exercise name", text: $draft.name)
+                TextField("Muscle group", text: $draft.muscleGroup)
+                    .textInputAutocapitalization(.words)
+            }
+            .navigationTitle(draft.name.isEmpty ? "New exercise" : "Edit exercise")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        draft.muscleGroup = draft.muscleGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !draft.name.isEmpty, !draft.muscleGroup.isEmpty else { return }
+                        save(draft)
+                        dismiss()
+                    }
+                    .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.muscleGroup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
 }
 
 struct TemplatePicker: View {
@@ -1717,7 +1850,9 @@ struct TemplateEditorState: Identifiable {
 
 struct TemplateEditor: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(ExerciseCatalog.storageKey) private var catalogData = Data()
     @State private var draft: WorkoutTemplate
+    @State private var showingExerciseManager = false
     let isNew: Bool
     let save: (WorkoutTemplate) -> Void
 
@@ -1725,6 +1860,13 @@ struct TemplateEditor: View {
         _draft = State(initialValue: template)
         self.isNew = isNew
         self.save = save
+    }
+
+    private var catalog: [ExerciseDefinition] { ExerciseCatalog.decode(catalogData) }
+    private var muscleGroups: [String] { ExerciseCatalog.muscleGroups(in: catalog) }
+    private func exercises(for group: String, including current: String = "") -> [String] {
+        let values = ExerciseCatalog.exercises(for: group, in: catalog)
+        return current.isEmpty || values.contains(current) ? values : (values + [current]).sorted()
     }
 
     var body: some View {
@@ -1735,19 +1877,25 @@ struct TemplateEditor: View {
                     TextField("Description (optional)", text: $draft.subtitle)
                 }
                 Section("EXERCISES") {
+                    Button { showingExerciseManager = true } label: {
+                        Label("Manage exercise catalog", systemImage: "slider.horizontal.3")
+                    }
                     ForEach($draft.exercises) { $item in
                         VStack(alignment: .leading) {
                             Picker("Muscle group", selection: $item.muscleGroup) {
-                                ForEach(ExerciseCatalog.muscleGroups, id: \.self) { Text($0).tag($0) }
+                                ForEach(muscleGroups.contains(item.muscleGroup) ? muscleGroups : (muscleGroups + [item.muscleGroup]).sorted(), id: \.self) { Text($0).tag($0) }
                             }
-                            .onChange(of: item.muscleGroup) { _, group in item.exercise = ExerciseCatalog.exercises(for: group).first ?? "" }
+                            .onChange(of: item.muscleGroup) { _, group in item.exercise = exercises(for: group).first ?? "" }
                             Picker("Exercise", selection: $item.exercise) {
-                                ForEach(ExerciseCatalog.exercises(for: item.muscleGroup), id: \.self) { Text($0).tag($0) }
+                                ForEach(exercises(for: item.muscleGroup, including: item.exercise), id: \.self) { Text($0).tag($0) }
                             }
                         }
                     }
                     .onDelete { draft.exercises.remove(atOffsets: $0) }
-                    Button { draft.exercises.append(TemplateExercise(muscleGroup: ExerciseCatalog.muscleGroups.first ?? "Chest", exercise: ExerciseCatalog.exercises(for: ExerciseCatalog.muscleGroups.first ?? "Chest").first ?? "")) } label: { Label("Add exercise", systemImage: "plus") }
+                    Button {
+                        guard let group = muscleGroups.first, let exercise = exercises(for: group).first else { return }
+                        draft.exercises.append(TemplateExercise(muscleGroup: group, exercise: exercise))
+                    } label: { Label("Add exercise", systemImage: "plus") }
                 }
             }
             .navigationTitle(isNew ? "New template" : "Edit template")
@@ -1755,12 +1903,14 @@ struct TemplateEditor: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines); guard !draft.name.isEmpty, !draft.exercises.isEmpty else { return }; save(draft); dismiss() } }
             }
+            .sheet(isPresented: $showingExerciseManager) { ExerciseCatalogManager() }
         }
     }
 }
 
 struct AddSetView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(ExerciseCatalog.storageKey) private var catalogData = Data()
     let add: (LiftSet) -> Void
     let existingSet: LiftSet?
     let recentSets: [LiftSet]
@@ -1769,14 +1919,16 @@ struct AddSetView: View {
     @State private var weightKg: Double
     @State private var reps: Int
     @State private var unit: WeightUnit = .kg
+    @State private var showingExerciseManager = false
 
     init(seed: ExerciseSeed?, existingSet: LiftSet?, recentSets: [LiftSet], add: @escaping (LiftSet) -> Void) {
         self.add = add
         self.existingSet = existingSet
         self.recentSets = recentSets
-        let defaultMuscle = ExerciseCatalog.muscleGroups[0]
+        let catalog = ExerciseCatalog.current()
+        let defaultMuscle = ExerciseCatalog.muscleGroups(in: catalog).first ?? "Other"
         let muscle = existingSet?.muscleGroup ?? seed?.muscleGroup ?? defaultMuscle
-        let exercise = existingSet?.exercise ?? seed?.exercise ?? ExerciseCatalog.exercises(for: muscle)[0]
+        let exercise = existingSet?.exercise ?? seed?.exercise ?? ExerciseCatalog.exercises(for: muscle, in: catalog).first ?? "Exercise"
         let previousSet = recentSets.first { $0.muscleGroup == muscle && $0.exercise == exercise }
         self._muscle = State(initialValue: muscle)
         self._exercise = State(initialValue: exercise)
@@ -1791,15 +1943,23 @@ struct AddSetView: View {
         )
     }
 
+    private var catalog: [ExerciseDefinition] { ExerciseCatalog.decode(catalogData) }
+    private var muscleGroups: [String] { ExerciseCatalog.muscleGroups(in: catalog) }
+    private func exercises(for group: String, including current: String = "") -> [String] {
+        let values = ExerciseCatalog.exercises(for: group, in: catalog)
+        return current.isEmpty || values.contains(current) ? values : (values + [current]).sorted()
+    }
+
     var body: some View {
         NavigationStack { Form {
-            Picker("Muscle group", selection: $muscle) { ForEach(ExerciseCatalog.muscleGroups, id: \.self) { Text($0).tag($0) } }
+            Picker("Muscle group", selection: $muscle) { ForEach(muscleGroups.contains(muscle) ? muscleGroups : (muscleGroups + [muscle]).sorted(), id: \.self) { Text($0).tag($0) } }
                 .onChange(of: muscle) { _, newValue in
-                    exercise = ExerciseCatalog.exercises(for: newValue)[0]
+                    exercise = exercises(for: newValue).first ?? "Exercise"
                     applyPreviousSetDefault()
                 }
-            Picker("Exercise", selection: $exercise) { ForEach(ExerciseCatalog.exercises(for: muscle), id: \.self) { Text($0).tag($0) } }
+            Picker("Exercise", selection: $exercise) { ForEach(exercises(for: muscle, including: exercise), id: \.self) { Text($0).tag($0) } }
                 .onChange(of: exercise) { _, _ in applyPreviousSetDefault() }
+            Button { showingExerciseManager = true } label: { Label("Manage exercises", systemImage: "slider.horizontal.3") }
             Section("Weight") {
                 Picker("Unit", selection: $unit) { ForEach(WeightUnit.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
                 HStack {
@@ -1820,7 +1980,9 @@ struct AddSetView: View {
         }.navigationTitle(existingSet == nil ? "Add set" : "Edit set").toolbar {
             ToolbarItem(placement: .confirmationAction) { Button(existingSet == nil ? "Add" : "Save") { add(LiftSet(exercise: exercise, muscleGroup: muscle, weightKg: weightKg, reps: reps)); dismiss() } }
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-        } }
+        }
+        .sheet(isPresented: $showingExerciseManager) { ExerciseCatalogManager() }
+        }
     }
 
     private func applyPreviousSetDefault() {
