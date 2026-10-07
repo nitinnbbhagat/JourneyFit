@@ -953,12 +953,14 @@ struct InBodyDetectedValues: Identifiable {
 struct InBodyMeasurementEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
+    @Query(sort: \InBodyMeasurement.measuredAt, order: .reverse) private var previousMeasurements: [InBodyMeasurement]
     @State private var date: Date
     @State private var weightText: String
     @State private var bodyFatText: String
     @State private var visceralFatText: String
     @State private var bmiText: String
     @State private var showingSource = false
+    @State private var appliedPreviousDefaults = false
     let detectedValues: InBodyDetectedValues
     let sourceImage: UIImage?
     let existingMeasurement: InBodyMeasurement?
@@ -1017,7 +1019,17 @@ struct InBodyMeasurementEditor: View {
                 ToolbarItem(placement: .confirmationAction) { Button(isEditing ? "Save" : "Add to progress") { save() }.disabled(!canSave) }
             }
             .sheet(isPresented: $showingSource) { if let sourceImage { InBodyImagePreview(image: sourceImage) } }
+            .onAppear { applyPreviousDefaultsIfNeeded() }
         }
+    }
+
+    private func applyPreviousDefaultsIfNeeded() {
+        guard !isEditing, !appliedPreviousDefaults, let previous = previousMeasurements.first else { return }
+        appliedPreviousDefaults = true
+        if weightText.isEmpty { weightText = Self.text(previous.weightKg) }
+        if bodyFatText.isEmpty { bodyFatText = Self.text(previous.bodyFatPercent) }
+        if visceralFatText.isEmpty { visceralFatText = Self.text(previous.visceralFatLevel) }
+        if bmiText.isEmpty { bmiText = Self.text(previous.bmi) }
     }
 
     @ViewBuilder
