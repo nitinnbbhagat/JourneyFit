@@ -339,7 +339,7 @@ struct AppTabView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            DashboardView(startWorkout: { selectedTab = .log })
+            DashboardView()
                 .tabItem { Label("Today", systemImage: "house.fill") }.tag(AppTab.today)
             WorkoutLogView(requestedWorkoutID: $requestedWorkoutID)
                 .tabItem { Label("Log", systemImage: "plus.circle.fill") }.tag(AppTab.log)
@@ -395,7 +395,6 @@ struct DashboardView: View {
     @State private var showingPeriodPicker = false
     @State private var selectedInsightMuscleGroup: String?
     @State private var selectedInsightExercise: String?
-    let startWorkout: () -> Void
 
     private var selectedInterval: DateInterval {
         DateInterval(start: Calendar.current.startOfDay(for: startDate), end: Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: endDate))!)
@@ -431,15 +430,6 @@ struct DashboardView: View {
                                 .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .center)
                         } else {
                             Button { Task { await health.requestAuthorization() } } label: { Label("Connect Apple Health", systemImage: "heart.fill").frame(maxWidth: .infinity).padding(.vertical, 10) }.buttonStyle(.borderedProminent).tint(.pink)
-                        }
-                        JourneyFitCard {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Label("TRAINING", systemImage: "figure.strengthtraining.traditional").font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
-                                Text(strengthWorkouts.isEmpty ? "Ready for your first workout?" : "Ready to train?").font(.title3.weight(.bold))
-                                Text(strengthWorkouts.isEmpty ? "Log each set as you go and JourneyFit will build your progress history." : "Start a fresh session or continue logging today’s workout.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
-                                Button(action: startWorkout) { Label(strengthWorkouts.isEmpty ? "Start workout" : "Open workout log", systemImage: "plus.circle.fill").frame(maxWidth: .infinity).padding(.vertical, 5) }
-                                    .buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
-                            }
                         }
                         TrainingInsightsDashboard(
                             workouts: strengthWorkouts,
