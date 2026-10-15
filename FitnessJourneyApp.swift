@@ -393,6 +393,8 @@ struct DashboardView: View {
     @State private var displayedWorkoutCount = 0
     @State private var isCustomPeriod = false
     @State private var showingPeriodPicker = false
+    @State private var selectedInsightMuscleGroup: String?
+    @State private var selectedInsightExercise: String?
     let startWorkout: () -> Void
 
     private var selectedInterval: DateInterval {
@@ -439,18 +441,11 @@ struct DashboardView: View {
                                     .buttonStyle(.borderedProminent).tint(JourneyFitTheme.accent)
                             }
                         }
-                        if !trainingInsights.isEmpty {
-                            JourneyFitCard {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Label("TRAINING INSIGHTS", systemImage: "chart.line.uptrend.xyaxis")
-                                        .font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
-                                    ForEach(trainingInsights) { insight in
-                                        Label(insight.message, systemImage: insight.symbol)
-                                            .font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.ink)
-                                    }
-                                }
-                            }
-                        }
+                        TrainingInsightsDashboard(
+                            workouts: strengthWorkouts,
+                            selectedMuscleGroup: $selectedInsightMuscleGroup,
+                            selectedExercise: $selectedInsightExercise
+                        )
                     }
                     .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 28)
                 }
@@ -488,31 +483,130 @@ struct DashboardView: View {
         }
     }
 
-    private struct TrainingInsight: Identifiable {
-        let id: String
-        let message: String
-        let symbol: String
+}
+
+struct TrainingInsightsDashboard: View {
+    private struct Occurrence: Identifiable {
+        let id: Date
+        let date: Date
+        let weight: Double
+        let totalReps: Int
     }
 
-    private var trainingInsights: [TrainingInsight] {
-        let ordered = strengthWorkouts.sorted { $0.loggedAt > $1.loggedAt }
-        guard let latest = ordered.first else { return [] }
-        var seen = Set<String>()
-        let exercises = latest.sets.sorted { $0.loggedOrder < $1.loggedOrder }.map(\.exercise).filter { seen.insert($0).inserted }
-        return exercises.map { exercise in
-            let currentSets = latest.sets.filter { $0.exercise == exercise }
-            guard let previous = ordered.dropFirst().first(where: { $0.sets.contains(where: { $0.exercise == exercise }) }) else {
-                return TrainingInsight(id: exercise, message: "\(exercise): first logged session—your baseline is set.", symbol: "flag.checkered")
+    let workouts: [StrengthWorkout]
+    @Binding var selectedMuscleGroup: String?
+    @Binding var selectedExercise: String?
+
+    private var muscleGroups: [String] {
+        Array(Set(workouts.flatMap(\.sets).map(\.muscleGroup))).sorted()
+    }
+
+    private var activeMuscleGroup: String? {
+        selectedMuscleGroup.flatMap { muscleGroups.contains($0) ? $0 : nil }
+    }
+
+    private var exercises: [String] {
+        guard let activeMuscleGroup else { return [] }
+        return Array(Set(workouts.flatMap(\.sets)
+            .filter { $0.muscleGroup == activeMuscleGroup }
+            .map(\.exercise))).sorted()
+    }
+
+    private var activeExercise: String? {
+        selectedExercise.flatMap { exercises.contains($0) ? $0 : nil }
+    }
+
+    private var occurrences: [Occurrence] {
+        guard let activeMuscleGroup, let activeExercise else { return [] }
+        let calendar = Calendar.current
+        let matchingWorkouts = workouts.filter {
+            $0.sets.contains { $0.muscleGroup == activeMuscleGroup && $0.exercise == activeExercise }
+        }
+        let byDay = Dictionary(grouping: matchingWorkouts) { calendar.startOfDay(for: $0.startedAt) }
+        return byDay.compactMap { day, workouts in
+            let sets = workouts.flatMap(\.sets).filter { $0.muscleGroup == activeMuscleGroup && $0.exercise == activeExercise }
+            guard !sets.isEmpty else { return nil }
+            return Occurrence(id: day, date: day, weight: sets.map(\.weightKg).max() ?? 0, totalReps: sets.reduce(0) { $0 + $1.reps })
+        }
+        .sorted { $0.date < $1.date }
+        .suffix(4)
+        .map { $0 }
+    }
+
+    private var insightText: String? {
+        guard let first = occurrences.first, let latest = occurrences.last else { return nil }
+        guard occurrences.count > 1 else { return "This is your baseline. Log this exercise again to compare progress." }
+        let weightChange = latest.weight - first.weight
+        let repsChange = latest.totalReps - first.totalReps
+        if weightChange > 0 {
+            return "Working weight increased from \(first.weight.formatted()) kg to \(latest.weight.formatted()) kg across these \(occurrences.count) occurrences."
+        }
+        if weightChange < 0 {
+            return "Working weight moved from \(first.weight.formatted()) kg to \(latest.weight.formatted()) kg across these \(occurrences.count) occurrences."
+        }
+        if repsChange > 0 {
+            return "At \(latest.weight.formatted()) kg, total reps increased by \(repsChange) across these \(occurrences.count) occurrences."
+        }
+        if repsChange < 0 {
+            return "At \(latest.weight.formatted()) kg, total reps changed by \(repsChange) across these \(occurrences.count) occurrences."
+        }
+        return "You matched your working weight and total reps across these \(occurrences.count) occurrences."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("TRAINING INSIGHTS", systemImage: "chart.line.uptrend.xyaxis")
+                .font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
+            HStack(spacing: 10) {
+                Picker("Muscle group", selection: $selectedMuscleGroup) {
+                    Text("Choose group").tag(Optional<String>.none)
+                    ForEach(muscleGroups, id: \.self) { Text($0).tag(Optional($0)) }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onChange(of: selectedMuscleGroup) { _, _ in selectedExercise = nil }
+
+                Picker("Exercise", selection: $selectedExercise) {
+                    Text("Choose exercise").tag(Optional<String>.none)
+                    ForEach(exercises, id: \.self) { Text($0).tag(Optional($0)) }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            let currentReps = currentSets.reduce(0) { $0 + $1.reps }
-            let previousReps = previous.sets.filter { $0.exercise == exercise }.reduce(0) { $0 + $1.reps }
-            let currentWeight = currentSets.map(\.weightKg).max() ?? 0
-            let previousWeight = previous.sets.filter { $0.exercise == exercise }.map(\.weightKg).max() ?? 0
-            if currentWeight > previousWeight {
-                return TrainingInsight(id: exercise, message: "\(exercise): +\((currentWeight - previousWeight).formatted()) kg vs your previous session.", symbol: "arrow.up.right")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(JourneyFitTheme.accent)
+
+            JourneyFitCard {
+                if selectedMuscleGroup == nil || selectedExercise == nil {
+                    Text("Choose a muscle group and exercise to review its latest four occurrences.")
+                        .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                } else if occurrences.isEmpty {
+                    Text("No logged occurrences found for this exercise.")
+                        .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("LAST \(occurrences.count) OCCURRENCE\(occurrences.count == 1 ? "" : "S")")
+                            .font(.caption.weight(.bold)).tracking(0.8).foregroundStyle(JourneyFitTheme.muted)
+                        if let insightText {
+                            Label(insightText, systemImage: "chart.line.uptrend.xyaxis")
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(JourneyFitTheme.ink)
+                        }
+                        ForEach(occurrences) { occurrence in
+                            HStack {
+                                Text(occurrence.date.formatted(date: .abbreviated, time: .omitted))
+                                    .font(.subheadline)
+                                Spacer()
+                                Text("\(occurrence.totalReps) reps")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("·") .foregroundStyle(JourneyFitTheme.muted)
+                                Text("\(occurrence.weight.formatted()) kg")
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                            .foregroundStyle(JourneyFitTheme.ink)
+                        }
+                    }
+                }
             }
-            let delta = currentReps - previousReps
-            return TrainingInsight(id: exercise, message: delta == 0 ? "\(exercise): matched your previous session." : "\(exercise): \(delta > 0 ? "+" : "")\(delta) reps vs your previous session.", symbol: delta >= 0 ? "chart.line.uptrend.xyaxis" : "arrow.down.right")
         }
     }
 }
@@ -555,20 +649,20 @@ struct LiftingProgressDashboard: View {
     }
 
     private var muscleGroups: [String] { Array(Set(workouts.flatMap(\.sets).map(\.muscleGroup))).sorted() }
-    private var activeMuscleGroup: String? { selectedMuscleGroup.flatMap { muscleGroups.contains($0) ? $0 : nil } ?? muscleGroups.first }
+    private var activeMuscleGroup: String? { selectedMuscleGroup.flatMap { muscleGroups.contains($0) ? $0 : nil } }
     private var exercises: [String] {
         guard let activeMuscleGroup else { return [] }
         return Array(Set(workouts.flatMap(\.sets).filter { $0.muscleGroup == activeMuscleGroup }.map(\.exercise))).sorted()
     }
-    private var activeExercise: String? { selectedExercise.flatMap { exercises.contains($0) ? $0 : nil } ?? exercises.first }
+    private var activeExercise: String? { selectedExercise.flatMap { exercises.contains($0) ? $0 : nil } }
     private var points: [ProgressPoint] {
-        guard let activeExercise else { return [] }
+        guard let activeMuscleGroup, let activeExercise else { return [] }
         let calendar = Calendar.current
-        let workoutsByDay = Dictionary(grouping: workouts.filter { $0.sets.contains(where: { $0.exercise == activeExercise }) }) {
+        let workoutsByDay = Dictionary(grouping: workouts.filter { $0.sets.contains(where: { $0.muscleGroup == activeMuscleGroup && $0.exercise == activeExercise }) }) {
             calendar.startOfDay(for: $0.startedAt)
         }
         return workoutsByDay.compactMap { day, workouts in
-            let sets = workouts.flatMap(\.sets).filter { $0.exercise == activeExercise }
+            let sets = workouts.flatMap(\.sets).filter { $0.muscleGroup == activeMuscleGroup && $0.exercise == activeExercise }
             guard !sets.isEmpty else { return nil }
             // One point per date prevents duplicate x-values and represents the
             // complete exercise volume for that workout day.
@@ -634,7 +728,10 @@ struct LiftingProgressDashboard: View {
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(JourneyFitTheme.accent)
             if displayedPoints.isEmpty {
-                JourneyFitCard { Text("Log a strength workout to see your progress over time.").font(.subheadline).foregroundStyle(JourneyFitTheme.muted) }
+                JourneyFitCard {
+                    Text(selectedMuscleGroup == nil || selectedExercise == nil ? "Choose a muscle group and exercise to see its progress over time." : "No logged sessions found for this exercise.")
+                        .font(.subheadline).foregroundStyle(JourneyFitTheme.muted)
+                }
             } else {
                 JourneyFitCard {
                     VStack(alignment: .leading, spacing: 14) {
