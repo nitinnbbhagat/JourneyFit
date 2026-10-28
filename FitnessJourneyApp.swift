@@ -1883,7 +1883,9 @@ struct TemplatePicker: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(templates) { template in templateRow(template) }
+                ForEach(Array(templates.enumerated()), id: \.element.id) { index, template in
+                    templateRow(template, at: index)
+                }
                     .onDelete { offsets in
                         var updated = templates
                         updated.remove(atOffsets: offsets)
@@ -1910,7 +1912,7 @@ struct TemplatePicker: View {
     }
 
     @ViewBuilder
-    private func templateRow(_ template: WorkoutTemplate) -> some View {
+    private func templateRow(_ template: WorkoutTemplate, at index: Int) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
                 choose(template)
@@ -1922,11 +1924,33 @@ struct TemplatePicker: View {
                     Text(template.exercises.map(\.exercise).joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }.padding(.vertical, 4)
             }.buttonStyle(.plain)
-            Button("Edit") {
-                editor = TemplateEditorState(template: template, isNew: false)
+            HStack(spacing: 12) {
+                Button("Edit") {
+                    editor = TemplateEditorState(template: template, isNew: false)
+                }
+                .font(.caption.weight(.semibold)).buttonStyle(.borderless).foregroundStyle(JourneyFitTheme.accent)
+                Spacer()
+                Button { moveTemplate(from: index, to: index - 1) } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .accessibilityLabel("Move \(template.name) up")
+                .disabled(index == 0)
+                Button { moveTemplate(from: index, to: index + 1) } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .accessibilityLabel("Move \(template.name) down")
+                .disabled(index == templates.count - 1)
             }
             .font(.caption.weight(.semibold)).buttonStyle(.borderless).foregroundStyle(JourneyFitTheme.accent)
         }
+    }
+
+    private func moveTemplate(from source: Int, to destination: Int) {
+        guard templates.indices.contains(source), templates.indices.contains(destination), source != destination else { return }
+        var updated = templates
+        let template = updated.remove(at: source)
+        updated.insert(template, at: destination)
+        save(updated)
     }
 
     private func save(_ templates: [WorkoutTemplate]) {
